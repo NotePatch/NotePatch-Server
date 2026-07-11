@@ -1,0 +1,29 @@
+services:
+  openclaw-gateway:
+    image: ${OPENCLAW_USER_GATEWAY_IMAGE:-__DEFAULT_IMAGE__}
+    container_name: ${OPENCLAW_CONTAINER_NAME:-__DEFAULT_CONTAINER_NAME__}
+    restart: unless-stopped
+    environment:
+      HOME: /home/node
+      OPENCLAW_SKIP_CHANNELS: "1"
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    volumes:
+      - __HOME_DIR__:/home/node
+      - __CACHE_DIR__:/home/node/.openclaw/cache
+      - __TMP_DIR__:/tmp/openclaw-runtime
+      - __WORKSPACE_DIR__:__WORKSPACE_DIR__
+      - /var/run/docker.sock:/var/run/docker.sock
+__GROUP_ADD_BLOCK__
+    command:
+      - sh
+      - -lc
+      - __GATEWAY_COMMAND__
+    networks:
+      - notepatch
+
+networks:
+  notepatch:
+    external: true
+    name: ${OPENCLAW_DOCKER_NETWORK:-__DEFAULT_NETWORK__}

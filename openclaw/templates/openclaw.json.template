@@ -1,0 +1,16 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": __WORKSPACE_DIR_JSON__,
+      "model": {"primary": __MODEL_JSON__},
+      "skills": __SKILLS_JSON__,
+      "sandbox": {"mode": "all", "workspaceAccess": "rw"}
+    }
+  },
+  "tools": {
+    "allow": ["read", "write", "edit"],
+    "deny": ["exec", "process", "browser", "web_fetch", "web_search"],
+    "fs": {"workspaceOnly": true}
+  },
+  "models": __MODELS_JSON__
+}

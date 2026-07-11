@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "profiles": {
+    "openai:default": {
+      "type": "api_key",
+      "provider": "openai",
+      "keyRef": {"source": "env", "provider": "default", "id": "OPENAI_API_KEY"}
+    }
+  }
+}

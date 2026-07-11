@@ -1,0 +1,275 @@
+name: notepatch-server
+
+x-backend: &backend
+  image: notepatch-backend:local
+  build:
+    context: .
+    dockerfile: infra/docker/backend.Dockerfile
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
+    OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
+    OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  api:
+    <<: *backend
+    command: uvicorn notepatch.entrypoints.api:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${API_PORT:-8001}:8000"
+    volumes:
+      - tusd_data:/tusd-data:ro
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    <<: *backend
+    command: python -m notepatch.entrypoints.worker --queues default
+    restart: unless-stopped
+    environment:
+      NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
+      OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
+      OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      WORKER_QUEUES: default
+    volumes:
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+
+  ocr-worker:
+    profiles: ["ocr"]
+    build:
+      context: .
+      dockerfile: infra/docker/ocr-worker.Dockerfile
+    command: sh -lc "python -m notepatch.entrypoints.ocr_healthcheck && python -m notepatch.entrypoints.worker --queues ocr"
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
+      OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
+      OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      WORKER_QUEUES: ${OCR_WORKER_QUEUES:-ocr}
+      OCR_ENGINE: paddleocr
+      PADDLEOCR_USE_GPU: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    gpus: all
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - paddleocr-cache:/models/paddlex
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+      docserver:
+        condition: service_healthy
+      embedding-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/notepatch-ocr-worker-ready && python -c 'import paddle, cv2; assert paddle.device.is_compiled_with_cuda()'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+
+  openclaw-supervisor:
+    <<: *backend
+    command: python -m notepatch.entrypoints.supervisor
+    restart: unless-stopped
+    volumes:
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  docserver:
+    build:
+      context: .
+      dockerfile: infra/docker/doctr.Dockerfile
+    image: notepatch-doctr:local
+    restart: unless-stopped
+    gpus: all
+    environment:
+      DOCSERVER_BASE_DIR: /opt/notepatch/services/doctr
+      DOCSERVER_ILL_BATCH_SIZE: "64"
+      DOCSERVER_PNG_COMPRESS_LEVEL: "1"
+      DOCTR_ROOT: /opt/notepatch/services/doctr/vendor/DocTr
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/models/doctr:/opt/notepatch/services/doctr/vendor/DocTr/model_pretrained:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:8000/healthz'); assert b'weights_ready' in r.read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  embedding-service:
+    build:
+      context: .
+      dockerfile: infra/docker/embedding.Dockerfile
+    image: notepatch-embedding:local
+    restart: unless-stopped
+    gpus: all
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /models/huggingface
+    volumes:
+      - bge-cache:/models/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 600s
+
+  admin-web:
+    build:
+      context: .
+      dockerfile: infra/docker/admin.Dockerfile
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8001/api/v1}
+    ports:
+      - "0.0.0.0:${ADMIN_WEB_PORT:-5173}:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-notepatch}
+      POSTGRES_USER: ${POSTGRES_USER:-notepatch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-notepatch}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-notepatch} -d ${POSTGRES_DB:-notepatch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  seaweedfs-master:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: master -ip=seaweedfs-master -ip.bind=0.0.0.0
+    ports:
+      - "0.0.0.0:9333:9333"
+    volumes:
+      - seaweedfs_master:/data
+
+  seaweedfs-volume:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: volume -mserver=seaweedfs-master:9333 -ip=seaweedfs-volume -ip.bind=0.0.0.0 -port=8080
+    depends_on:
+      - seaweedfs-master
+    volumes:
+      - seaweedfs_volume:/data
+
+  seaweedfs-filer:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: filer -master=seaweedfs-master:9333 -ip=seaweedfs-filer -ip.bind=0.0.0.0
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume
+    ports:
+      - "0.0.0.0:8888:8888"
+    volumes:
+      - seaweedfs_filer:/data
+
+  seaweedfs-s3:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: s3 -filer=seaweedfs-filer:8888 -ip.bind=0.0.0.0 -port=8333 -config=/etc/seaweedfs/s3_config.json
+    depends_on:
+      - seaweedfs-filer
+    ports:
+      - "0.0.0.0:8333:8333"
+    volumes:
+      - ./infra/seaweedfs/s3_config.json:/etc/seaweedfs/s3_config.json:ro
+
+  tusd:
+    image: tusproject/tusd:v2
+    restart: unless-stopped
+    user: "0:0"
+    command:
+      - -host=0.0.0.0
+      - -port=1080
+      - -base-path=/files/
+      - -upload-dir=/data
+      - -disable-download
+      - -hooks-http=http://api:8000/api/v1/webhooks/tusd?secret=${TUSD_WEBHOOK_SECRET:-change-me-tusd-webhook-secret}
+      - -hooks-enabled-events=post-create,post-finish,post-terminate
+    ports:
+      - "0.0.0.0:1080:1080"
+    volumes:
+      - tusd_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    name: notepatch-server_postgres_data
+  seaweedfs_master:
+    name: notepatch-server_seaweedfs_master
+  seaweedfs_volume:
+    name: notepatch-server_seaweedfs_volume
+  seaweedfs_filer:
+    name: notepatch-server_seaweedfs_filer
+  tusd_data:
+    name: notepatch-server_tusd_data
+  paddleocr-cache:
+    name: notepatch-server_paddleocr-cache
+  bge-cache:
+    name: notepatch-server_bge-cache

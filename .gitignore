@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+node_modules/
+web/admin/node_modules/
+web/admin/dist/
+services/doctr/vendor/DocTr/model_pretrained/
+*.egg-info/
+*.db
