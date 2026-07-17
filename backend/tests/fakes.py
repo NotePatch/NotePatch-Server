@@ -88,16 +88,25 @@ class FakeSkillRunner:
             }
         elif schema is ScholarNotesResult:
             document_ids = [item["id"] for item in input_payload.get("documents", [])]
+            knowledge_points = input_payload.get("knowledge_points", [])
+            point = knowledge_points[0]
             payload = {
                 "title": "Linear Functions Scholar Notes",
-                "markdown": "# Linear Functions\n\n**Linear functions** have a constant rate of change.\n",
+                "html": (
+                    f'<article class="np-note"><section class="np-note-section np-knowledge-point" '
+                    f'data-knowledge-point-id="{point["id"]}"><h2>Linear Functions</h2>'
+                    "<p><strong>Linear functions</strong> have a constant rate of change.</p></section></article>"
+                ),
                 "outline": ["Linear Functions"],
-                "knowledge_points": ["Linear functions"],
+                "knowledge_points": [
+                    {"id": point["id"], "name": point["name"], "section_id": "linear-functions"}
+                ],
                 "review_suggestions": ["Practice slope questions"],
                 "source_document_ids": document_ids,
             }
         elif schema is GradingSkillResult:
             mode = input_payload.get("required_grading_mode", "provisional")
+            grading_points = input_payload.get("knowledge_points") or [{}]
             payload = {
                 "score": 8,
                 "max_score": 10,
@@ -105,7 +114,18 @@ class FakeSkillRunner:
                 "confidence": 0.8,
                 "summary": "The core method is correct but one step needs review.",
                 "per_question": [
-                    {"sequence_no": 1, "score": 8, "max_score": 10, "feedback": "Review the final step."}
+                    {
+                        "sequence_no": 1,
+                        "score": 8,
+                        "max_score": 10,
+                        "feedback": "Review the final step.",
+                        "knowledge_points": [
+                            {
+                                "id": grading_points[0].get("id"),
+                                "name": "Linear functions",
+                            }
+                        ],
+                    }
                 ],
                 "mistakes": [
                     {
@@ -119,14 +139,20 @@ class FakeSkillRunner:
                 ],
             }
         elif schema is NoteHighlightResult:
-            note = input_payload["study_note_markdown"]
+            note = input_payload["study_note_html"]
             payload = {
-                "markdown": note.replace("Linear functions", "**Linear functions**", 1),
+                "html": note.replace(
+                    'class="np-note-section np-knowledge-point"',
+                    'class="np-note-section np-knowledge-point np-highlight np-highlight--yellow"',
+                    1,
+                ),
                 "highlight_map": {
                     "items": [
                         {
                             "mistake_id": item["id"],
+                            "knowledge_point_id": item.get("knowledge_point_id") or input_payload["weighted_knowledge_points"][0]["id"],
                             "knowledge_point": item.get("knowledge_point") or "",
+                            "highlight_level": "yellow",
                             "matched_sections": ["Linear Functions"],
                             "confidence": 0.9,
                         }
@@ -135,12 +161,13 @@ class FakeSkillRunner:
                 },
             }
         elif schema is FlashcardsSkillResult:
+            point = input_payload["weighted_knowledge_points"][0]
             payload = {
                 "flashcards": [
                     {
+                        "knowledge_point_id": point["id"],
                         "front": "What characterizes a linear function?",
                         "back": "A constant rate of change.",
-                        "knowledge_point": "Linear functions",
                         "source_refs": [],
                         "difficulty": "medium",
                     }

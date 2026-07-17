@@ -12,6 +12,7 @@ class UserRead(ORMModel):
     username: str | None = None
     full_name: str | None = None
     is_active: bool
+    must_change_password: bool
     ai_history_enabled: bool
     created_at: datetime
 
@@ -38,6 +39,11 @@ class LogoutRequest(BaseModel):
 
 class UserPreferencesUpdate(BaseModel):
     ai_history_enabled: bool
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class TokenResponse(BaseModel):

@@ -81,6 +81,9 @@ class OpenClawRuntimePaths:
     def documents_root(self, user_id: str) -> Path:
         return self.notepatch_root(user_id) / "documents"
 
+    def task_documents_root(self, user_id: str, task_id: str) -> Path:
+        return self.task_input_dir(user_id, task_id) / "documents"
+
     def task_output_dir(self, user_id: str, task_id: str) -> Path:
         return self.notepatch_root(user_id) / "openclaw" / "tasks" / task_id / "output"
 

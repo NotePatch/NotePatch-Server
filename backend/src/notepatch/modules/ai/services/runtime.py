@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -43,12 +44,12 @@ class OpenClawUserRuntimeService(
 
     def provision_user(self, user: User, workspace: Workspace) -> dict:
         user_root = self.user_root(user.id)
+        shutil.rmtree(self.documents_root(user.id), ignore_errors=True)
         for path in (
             self.home_dir(user.id) / ".openclaw",
             self.auth_profiles_path(user.id).parent,
             self.skills_dir(user.id),
             self.workspace_dir(user.id),
-            self.documents_root(user.id),
             self.notepatch_root(user.id) / "openclaw" / "tasks",
             self.cache_dir(user.id),
             self.tmp_dir(user.id),

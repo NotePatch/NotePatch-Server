@@ -6,7 +6,13 @@ from sqlalchemy import func, select
 
 from notepatch.modules.learning.models.homework import Question
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
-from notepatch.modules.learning.models.learning import StudyNoteVersion
+from notepatch.modules.learning.models.learning import (
+    Flashcard,
+    FlashcardDeck,
+    KnowledgePoint,
+    LearningUnit,
+    StudyNoteVersion,
+)
 from notepatch.modules.learning.schemas.skills import (
     FlashcardsSkillResult,
     KnowledgeBuildResult,
@@ -16,6 +22,10 @@ from notepatch.modules.learning.schemas.skills import (
 from notepatch.modules.tasks.models.task import Task
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.platform.storage import StorageService
+from notepatch.modules.learning.services.flashcard_priority import FlashcardPriorityService
+from notepatch.modules.learning.services.html_notes import sanitize_note_html, validate_knowledge_point_references
+from notepatch.modules.learning.services.knowledge_points import KnowledgePointService
+from notepatch.platform.config import get_settings
 
 
 class LearningContentOperations:
@@ -99,6 +109,8 @@ class LearningContentOperations:
         }
 
     def build_knowledge_base(self, task: Task, storage: StorageService) -> dict:
+        document = self._document(task.payload.get("document_id") or task.resource_id, task.workspace_id)
+        learning_unit = self.ensure_learning_unit_for_document(document)
         existing = self.db.scalars(
             select(KnowledgeChunk).where(
                 KnowledgeChunk.workspace_id == task.workspace_id,
@@ -106,9 +118,13 @@ class LearningContentOperations:
             )
         ).all()
         if existing:
-            return {"chunks_created": 0, "chunk_ids": [chunk.id for chunk in existing], "reused": True}
-        document = self._document(task.payload.get("document_id") or task.resource_id, task.workspace_id)
-        learning_unit = self.ensure_learning_unit_for_document(document)
+            note_task = self.schedule_study_notes(learning_unit, reason="knowledge_reused")
+            return {
+                "chunks_created": 0,
+                "chunk_ids": [chunk.id for chunk in existing],
+                "reused": True,
+                "downstream_tasks": [{"id": note_task.id, "task_type": note_task.task_type}],
+            }
         source_text = self._required_ocr_text(document)
         result, run = self._skill().execute(
             task=task,
@@ -128,6 +144,17 @@ class LearningContentOperations:
             event_callback=lambda event, data: self._record_task_event(task, event, data),
         )
         self._ensure_active(task)
+        points = KnowledgePointService(
+            self.db,
+            self.embedding_client,
+            match_threshold=get_settings().knowledge_point_match_threshold,
+        ).resolve_many(
+            unit=learning_unit,
+            names=[item.title for item in result.chunks],
+            source_document_ids=[document.id],
+            vectors={item.title: vector for item, vector in zip(result.chunks, vectors, strict=True)},
+            owner=f"task:{task.id}:knowledge-points",
+        )
         chunk_ids: list[str] = []
         for item, vector in zip(result.chunks, vectors, strict=True):
             chunk = KnowledgeChunk(
@@ -149,31 +176,24 @@ class LearningContentOperations:
                     "prerequisites": item.prerequisites,
                     "order": item.order,
                     "source_ocr_run_id": task.payload.get("source_ocr_run_id"),
+                    "knowledge_point_id": points[item.title].id,
                 },
             )
             self.db.add(chunk)
             self.db.flush()
             chunk_ids.append(chunk.id)
+        learning_unit.knowledge_revision += 1
         self._ensure_active(task)
         self.db.commit()
         self._ensure_active(task)
-        notes = self._create_unique_tasks(
-            [
-                (
-                    "generate_study_notes",
-                    "learning_unit",
-                    learning_unit.id,
-                    {"learning_unit_id": learning_unit.id, "source_knowledge_task_id": task.id},
-                )
-            ],
-            force_reprocess=bool(task.payload.get("force_reprocess")),
-        )
+        note_task = self.schedule_study_notes(learning_unit, reason="knowledge_updated")
         return {
             "chunks_created": len(chunk_ids),
             "chunk_ids": chunk_ids,
             "output_key": run["output_key"],
             "learning_unit_id": learning_unit.id,
-            "downstream_tasks": [{"id": item.id, "task_type": item.task_type} for item in notes],
+            "knowledge_revision": learning_unit.knowledge_revision,
+            "downstream_tasks": [{"id": note_task.id, "task_type": note_task.task_type}],
         }
 
     def generate_study_notes(self, task: Task, storage: StorageService) -> dict:
@@ -181,10 +201,25 @@ class LearningContentOperations:
         if existing is not None:
             return {"learning_unit_id": existing.learning_unit_id, "study_note_version_id": existing.id, "reused": True}
         unit = self._learning_unit(task.payload.get("learning_unit_id") or task.resource_id, task.workspace_id)
+        expected_revision = int(task.payload.get("expected_knowledge_revision", unit.knowledge_revision))
+        if expected_revision != unit.knowledge_revision:
+            replacement = self.schedule_study_notes(unit, reason="knowledge_changed_before_note_start")
+            return {
+                "learning_unit_id": unit.id,
+                "skipped": True,
+                "reason": "knowledge_revision_changed",
+                "replacement_task_id": replacement.id,
+            }
         documents = self._unit_documents(unit.id, task.workspace_id)
         chunks = self._unit_chunks(unit.id, task.workspace_id)
         if not chunks:
             raise PermanentTaskError("Cannot generate study notes before knowledge chunks exist")
+        points = self.db.scalars(
+            select(KnowledgePoint).where(
+                KnowledgePoint.workspace_id == task.workspace_id,
+                KnowledgePoint.learning_unit_id == unit.id,
+            )
+        ).all()
         result, run = self._skill().execute(
             task=task,
             skill_name="notepatch_scholar_notes",
@@ -192,11 +227,40 @@ class LearningContentOperations:
                 "learning_unit": self._learning_unit_payload(unit),
                 "documents": [self._document_payload(document) for document in documents],
                 "knowledge_chunks": [self._chunk_payload(chunk) for chunk in chunks],
+                "knowledge_points": [
+                    {"id": point.id, "name": point.name, "source_document_ids": point.source_document_ids}
+                    for point in points
+                ],
+                "allowed_html_classes": sorted(
+                    {
+                        "np-note", "np-note-header", "np-note-title", "np-note-summary", "np-note-section",
+                        "np-knowledge-point", "np-callout", "np-callout--tip", "np-callout--warning",
+                        "np-formula", "np-table", "np-reinforcement",
+                    }
+                ),
             },
             output_filename="study_note.json",
             schema=ScholarNotesResult,
         )
         self._ensure_active(task)
+        self.db.refresh(unit)
+        if unit.knowledge_revision != expected_revision:
+            replacement = self.schedule_study_notes(unit, reason="knowledge_changed_during_note_generation")
+            return {
+                "learning_unit_id": unit.id,
+                "skipped": True,
+                "reason": "knowledge_revision_changed",
+                "replacement_task_id": replacement.id,
+            }
+        allowed_point_ids = {point.id for point in points}
+        result_point_ids = {item.id for item in result.knowledge_points}
+        if not result_point_ids.issubset(allowed_point_ids):
+            raise PermanentTaskError("Scholar notes returned unknown knowledge point ids")
+        try:
+            html = sanitize_note_html(result.html)
+            validate_knowledge_point_references(html, allowed_point_ids)
+        except ValueError as exc:
+            raise PermanentTaskError(str(exc)) from exc
         version_id = str(uuid.uuid4())
         version_no = int(
             self.db.scalar(
@@ -207,10 +271,12 @@ class LearningContentOperations:
             )
             or 0
         ) + 1
-        md_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "study_note", "md")
+        html_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "study_note", "html")
         json_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "study_note", "json")
-        self._put_text(storage, md_key, result.markdown, "text/markdown; charset=utf-8")
-        storage.put_json_artifact(json_key, result.model_dump(mode="json"), bucket=storage.bucket)
+        structured = result.model_dump(mode="json")
+        structured["html"] = html
+        self._put_text(storage, html_key, html, "text/html; charset=utf-8")
+        storage.put_json_artifact(json_key, structured, bucket=storage.bucket)
         self._ensure_active(task)
         note = StudyNoteVersion(
             id=version_id,
@@ -219,33 +285,27 @@ class LearningContentOperations:
             task_id=task.id,
             version_no=version_no,
             title=result.title,
-            markdown_object_key=md_key,
+            html_object_key=html_key,
             json_object_key=json_key,
+            knowledge_point_ids=[item.id for item in result.knowledge_points],
             source_document_ids=result.source_document_ids or [document.id for document in documents],
             source_mistake_ids=[],
+            edit_origin="skill",
             metadata_={"skill": "notepatch_scholar_notes", "skill_output_key": run["output_key"]},
         )
         self.db.add(note)
+        unit.notes_generated_revision = expected_revision
+        unit.note_generation_due_at = None
         self._ensure_active(task)
         self.db.commit()
         self._ensure_active(task)
-        flashcards = self._create_unique_tasks(
-            [
-                (
-                    "generate_flashcards",
-                    "learning_unit",
-                    unit.id,
-                    {"learning_unit_id": unit.id, "study_note_version_id": note.id},
-                )
-            ],
-            force_reprocess=True,
-        )
+        flashcard_task = self.schedule_flashcards(unit, note, reason="study_note_generated")
         return {
             "learning_unit_id": unit.id,
             "study_note_version_id": note.id,
-            "markdown_key": md_key,
+            "html_key": html_key,
             "json_key": json_key,
-            "downstream_tasks": [{"id": item.id, "task_type": item.task_type} for item in flashcards],
+            "downstream_tasks": [{"id": flashcard_task.id, "task_type": flashcard_task.task_type}],
         }
 
     def generate_flashcards(self, task: Task, storage: StorageService) -> dict:
@@ -259,18 +319,113 @@ class LearningContentOperations:
             .where(StudyNoteVersion.workspace_id == task.workspace_id, StudyNoteVersion.learning_unit_id == unit.id)
             .order_by(StudyNoteVersion.version_no.desc())
         )
+        if note is None:
+            return {"learning_unit_id": unit.id, "skipped": True, "reason": "no_study_note"}
+        expected_note_id = task.payload.get("study_note_version_id") or note.id
+        expected_attempt_revision = int(task.payload.get("expected_attempt_revision", unit.attempt_revision))
+        existing_deck = self.db.scalar(
+            select(FlashcardDeck).where(
+                FlashcardDeck.workspace_id == task.workspace_id,
+                FlashcardDeck.learning_unit_id == unit.id,
+                FlashcardDeck.study_note_version_id == expected_note_id,
+                FlashcardDeck.attempt_revision == expected_attempt_revision,
+            )
+        )
+        if existing_deck is not None:
+            return {"learning_unit_id": unit.id, "flashcard_deck_id": existing_deck.id, "reused": True}
+        if note.id != expected_note_id or unit.attempt_revision != expected_attempt_revision:
+            replacement = self.schedule_flashcards(unit, note, reason="flashcard_source_changed")
+            return {
+                "learning_unit_id": unit.id,
+                "skipped": True,
+                "reason": "source_revision_changed",
+                "replacement_task_id": replacement.id,
+            }
         chunks = self._unit_chunks(unit.id, task.workspace_id)
-        note_text = self._download_text(storage, storage.bucket, note.markdown_object_key) if note else None
+        note_html = self._download_text(storage, storage.bucket, note.html_object_key)
+        priority_service = FlashcardPriorityService(self.db)
+        weighted_points = priority_service.calculate(
+            workspace_id=task.workspace_id,
+            learning_unit_id=unit.id,
+            note=note,
+        )
+        if not weighted_points:
+            return {"learning_unit_id": unit.id, "skipped": True, "reason": "no_knowledge_points"}
         result, run = self._skill().execute(
             task=task,
             skill_name="notepatch_flashcards",
             input_payload={
                 "learning_unit": self._learning_unit_payload(unit),
-                "study_note_markdown": note_text,
+                "study_note_html": note_html,
+                "weighted_knowledge_points": weighted_points,
                 "knowledge_chunks": [self._chunk_payload(chunk) for chunk in chunks],
             },
             output_filename="flashcards.json",
             schema=FlashcardsSkillResult,
         )
         self._ensure_active(task)
-        return {"learning_unit_id": unit.id, "flashcards": result.model_dump(mode="json")["flashcards"], **run}
+        self.db.refresh(unit)
+        latest_note = self.db.scalar(
+            select(StudyNoteVersion)
+            .where(StudyNoteVersion.workspace_id == task.workspace_id, StudyNoteVersion.learning_unit_id == unit.id)
+            .order_by(StudyNoteVersion.version_no.desc())
+        )
+        if latest_note is None or latest_note.id != expected_note_id or unit.attempt_revision != expected_attempt_revision:
+            replacement = self.schedule_flashcards(unit, latest_note or note, reason="flashcard_source_changed_during_run")
+            return {
+                "learning_unit_id": unit.id,
+                "skipped": True,
+                "reason": "source_revision_changed",
+                "replacement_task_id": replacement.id,
+            }
+        candidates = {item["id"]: item for item in weighted_points}
+        returned_ids = [item.knowledge_point_id for item in result.flashcards]
+        if len(returned_ids) != len(set(returned_ids)) or not set(returned_ids).issubset(candidates):
+            raise PermanentTaskError("Flashcards contain duplicate or unknown knowledge point ids")
+        locked_unit = self.db.scalar(select(LearningUnit).where(LearningUnit.id == unit.id).with_for_update())
+        version_no = int(
+            self.db.scalar(
+                select(func.coalesce(func.max(FlashcardDeck.version_no), 0)).where(
+                    FlashcardDeck.workspace_id == task.workspace_id,
+                    FlashcardDeck.learning_unit_id == unit.id,
+                )
+            )
+            or 0
+        ) + 1
+        deck = FlashcardDeck(
+            workspace_id=task.workspace_id,
+            learning_unit_id=unit.id,
+            study_note_version_id=note.id,
+            task_id=task.id,
+            version_no=version_no,
+            attempt_revision=expected_attempt_revision,
+            weighting_config=priority_service.weighting_config(),
+            metadata_={"skill": "notepatch_flashcards", "skill_output_key": run["output_key"]},
+        )
+        self.db.add(deck)
+        self.db.flush()
+        for rank, item in enumerate(result.flashcards, start=1):
+            candidate = candidates[item.knowledge_point_id]
+            self.db.add(
+                Flashcard(
+                    workspace_id=task.workspace_id,
+                    deck_id=deck.id,
+                    knowledge_point_id=item.knowledge_point_id,
+                    front=item.front,
+                    back=item.back,
+                    priority_score=candidate["priority_score"],
+                    priority_factors=candidate["priority_factors"],
+                    source_refs=item.source_refs,
+                    difficulty=item.difficulty,
+                    rank=rank,
+                )
+            )
+        del locked_unit
+        self.db.commit()
+        return {
+            "learning_unit_id": unit.id,
+            "flashcard_deck_id": deck.id,
+            "version_no": deck.version_no,
+            "cards_created": len(result.flashcards),
+            **run,
+        }

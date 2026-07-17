@@ -10,6 +10,7 @@ from notepatch.modules.identity.models.workspace import Workspace
 from notepatch.modules.ai.services.supervisor import OpenClawContainerManager, OpenClawSupervisor
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.identity.services.presence import PresenceService
+from notepatch.modules.admin.models.admin import AdminOperation
 from tests.conftest import FakeRedis, register_user
 
 
@@ -210,6 +211,40 @@ def test_supervisor_recreates_gateway_when_openai_base_url_changes(client, db_se
         assert config["models"]["providers"]["openai"]["models"] == []
     finally:
         settings.openai_base_url = old_base_url
+
+
+def test_supervisor_removes_runtime_for_user_purge(client, db_sessionmaker):
+    user_id, workspace_id = _registered_user_and_workspace(client, db_sessionmaker, "supervisor-purge@example.com")
+    docker_client = FakeDockerClient()
+    manager = OpenClawContainerManager(docker_client=docker_client)
+    with db_sessionmaker() as db:
+        user = db.get(User, user_id)
+        workspace = db.get(Workspace, workspace_id)
+        manager.ensure_running(user, workspace)
+        operation = AdminOperation(
+            actor_user_id=user_id,
+            actor_workspace_id=workspace_id,
+            operation_type="purge_user",
+            target_type="user",
+            target_id=user_id,
+            status="running",
+            phase="runtime_cleanup_requested",
+            payload={},
+        )
+        db.add(operation)
+        db.commit()
+        operation_id = operation.id
+
+    OpenClawSupervisor(
+        db_factory=db_sessionmaker,
+        presence=PresenceService(redis_client=FakeRedis()),
+        container_manager=manager,
+    ).run_once()
+
+    with db_sessionmaker() as db:
+        assert db.get(AdminOperation, operation_id).phase == "runtime_cleanup_completed"
+    assert manager._get_container(f"notepatch-openclaw-{user_id}") is None
+    assert not manager.runtime.user_root(user_id).exists()
 
 
 def test_supervisor_stops_gateway_after_offline_grace(client, db_sessionmaker):

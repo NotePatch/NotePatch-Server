@@ -14,7 +14,7 @@ from notepatch.modules.tasks.services.task import TaskService
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+def get_authenticated_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -24,6 +24,12 @@ def get_current_user(
     user = db.get(User, payload["sub"])
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+    return user
+
+
+def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
+    if user.must_change_password:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password change required")
     return user
 
 

@@ -173,6 +173,16 @@ class DocumentPurgeService:
         related: list[Task] = []
         for task in self.db.scalars(select(Task).where(Task.workspace_id == document.workspace_id)).all():
             payload = task.payload or {}
+            completed_chat = (
+                task.task_type == "openclaw_agent_run"
+                and task.resource_type == "chat_conversation"
+                and task.status in {"succeeded", "failed", "cancelled"}
+            )
+            if completed_chat:
+                # Completed chat text is user history. Its source references are
+                # redacted separately without treating the answer as a derived artifact.
+                continue
+            mirrored_document_ids = payload.get("mirrored_document_ids") or []
             direct = (
                 (task.resource_type == "document" and task.resource_id == document.id)
                 or payload.get("document_id") == document.id
@@ -180,6 +190,11 @@ class DocumentPurgeService:
                 or payload.get("homework_id") in homework_ids
                 or (task.resource_type == "learning_unit" and task.resource_id in unit_ids)
                 or payload.get("learning_unit_id") in unit_ids
+                or (
+                    task.task_type == "openclaw_agent_run"
+                    and task.status in {"queued", "running"}
+                    and document.id in mirrored_document_ids
+                )
             )
             citations = (task.result or {}).get("citations") if isinstance(task.result, dict) else None
             cited = any(
@@ -301,9 +316,9 @@ class DocumentPurgeService:
             (self.storage.bucket, key)
             for item in context["notes"]
             for key in (
-                item.markdown_object_key,
+                item.html_object_key,
                 item.json_object_key,
-                item.highlighted_object_key,
+                item.highlighted_html_object_key,
                 item.highlight_map_object_key,
             )
             if key
@@ -333,6 +348,7 @@ class DocumentPurgeService:
             )
 
     def _delete_database_data(self, document: Document, context: dict) -> None:
+        self._redact_completed_chat_sources(document)
         related_task_ids = {item.id for item in context["related_tasks"]}
         for message in self.db.scalars(
             select(ChatMessage).where(ChatMessage.workspace_id == document.workspace_id, ChatMessage.task_id.in_(related_task_ids))
@@ -396,18 +412,76 @@ class DocumentPurgeService:
                 self.db.delete(unit)
         self.db.commit()
 
+    def _redact_completed_chat_sources(self, document: Document) -> None:
+        chat_tasks = self.db.scalars(
+            select(Task).where(
+                Task.workspace_id == document.workspace_id,
+                Task.task_type == "openclaw_agent_run",
+                Task.resource_type == "chat_conversation",
+                Task.status == "succeeded",
+            )
+        ).all()
+        for task in chat_tasks:
+            result = dict(task.result or {})
+            task_citations = [item for item in (result.get("citations") or []) if isinstance(item, dict)]
+            removed_task_citations = [
+                item for item in task_citations if item.get("document_id") == document.id
+            ]
+            remaining_task_citations = [
+                item for item in task_citations if item.get("document_id") != document.id
+            ]
+
+            message = self.db.scalar(
+                select(ChatMessage).where(
+                    ChatMessage.workspace_id == document.workspace_id,
+                    ChatMessage.task_id == task.id,
+                    ChatMessage.role == "assistant",
+                )
+            )
+            message_citations = [
+                item for item in ((message.citations if message is not None else None) or task_citations)
+                if isinstance(item, dict)
+            ]
+            removed_message_citations = [
+                item for item in message_citations if item.get("document_id") == document.id
+            ]
+            remaining_message_citations = [
+                item for item in message_citations if item.get("document_id") != document.id
+            ]
+            if not removed_task_citations and not removed_message_citations:
+                continue
+
+            source_status = "partially_unavailable" if remaining_message_citations else "unavailable"
+            if removed_task_citations:
+                result["citations"] = remaining_task_citations
+                result["source_status"] = source_status
+                task.result = result
+            if message is not None:
+                message.citations = remaining_message_citations
+                message.source_status = source_status
+
     def _schedule_rebuilds(self, purge_task: Task, context: dict) -> list[Task]:
         created: list[Task] = []
         service = TaskService(self.db)
         for unit_id in context["rebuild_unit_ids"]:
             if self._unit_chunks(unit_id, purge_task.workspace_id):
+                unit = self.db.get(LearningUnit, unit_id)
+                if unit is None:
+                    continue
+                run_at = utcnow() + timedelta(seconds=self.settings.study_note_debounce_seconds)
+                unit.note_generation_due_at = run_at
                 created.append(
-                    service.create_task(
+                    service.create_delayed_task(
                         workspace_id=purge_task.workspace_id,
                         task_type="generate_study_notes",
+                        run_at=run_at,
                         resource_type="learning_unit",
                         resource_id=unit_id,
-                        payload={"learning_unit_id": unit_id, "reason": "document_purged"},
+                        payload={
+                            "learning_unit_id": unit_id,
+                            "expected_knowledge_revision": unit.knowledge_revision,
+                            "reason": "document_purged",
+                        },
                     )
                 )
         for homework_id in context["regrade_homework_ids"]:

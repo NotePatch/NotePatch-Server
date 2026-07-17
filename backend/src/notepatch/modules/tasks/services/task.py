@@ -177,6 +177,57 @@ class TaskService:
                 self.db.commit()
             return False
 
+    def schedule_task_at(self, task: Task, run_at, *, queue_name: str | None = None) -> bool:
+        queue_name = queue_name or queue_name_for_task_type(self.settings, task.task_type)
+        queue_key = redis_key_for_queue(self.settings, queue_name)
+        retry_key = retry_key_for_queue(self.settings, queue_name)
+        task.status = "queued"
+        task.next_attempt_at = run_at
+        task.finished_at = None
+        task.updated_at = utcnow()
+        self.add_event(
+            task,
+            "scheduled",
+            "Task scheduled for delayed execution",
+            data={"queue": queue_name, "run_at": run_at.isoformat()},
+        )
+        self.db.commit()
+        try:
+            client = redis.from_url(self.settings.redis_url, socket_connect_timeout=1, socket_timeout=1)
+            client.lrem(queue_key, 0, task.id)
+            client.zadd(retry_key, {task.id: run_at.timestamp()})
+            return True
+        except Exception as exc:
+            logger.warning("Could not schedule task %s in %s: %s", task.id, retry_key, exc)
+            task.status = "failed"
+            task.error_message = f"Task schedule unavailable: {exc}"
+            task.finished_at = utcnow()
+            self.add_event(task, "schedule_failed", "Task could not be scheduled", level="error")
+            self.db.commit()
+            return False
+
+    def create_delayed_task(
+        self,
+        *,
+        workspace_id: str,
+        task_type: str,
+        run_at,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        payload: dict | None = None,
+    ) -> Task:
+        task = self.create_task(
+            workspace_id=workspace_id,
+            task_type=task_type,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            payload=payload,
+            enqueue=False,
+        )
+        if not self.schedule_task_at(task, run_at):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Task schedule is unavailable")
+        return task
+
     def claim_task(self, task_id: str) -> Task | None:
         now = utcnow()
         result = self.db.execute(

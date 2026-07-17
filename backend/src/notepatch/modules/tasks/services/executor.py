@@ -4,6 +4,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.chat import ChatService
+from notepatch.modules.admin.models.admin import AdminOperation
 from notepatch.modules.ai.services.gateway import OpenClawRunner, get_openclaw_runner
 from notepatch.modules.ai.services.skill_runner import OpenClawSkillRunner
 from notepatch.modules.documents.models.document import Document
@@ -98,6 +99,11 @@ def _handle_task_failure(
             document = _task_document(db, task)
             if document is not None:
                 document.purge_status = "queued"
+        elif task.task_type == "purge_user":
+            operation = db.get(AdminOperation, task.payload.get("admin_operation_id"))
+            if operation is not None:
+                operation.status = "queued"
+                operation.error_message = str(exc)
         ChatService(db).mark_assistant_queued(task)
         db.commit()
         return
@@ -118,6 +124,12 @@ def _handle_task_failure(
         document = _task_document(db, task)
         if document is not None:
             document.purge_status = "failed"
+    elif task.task_type == "purge_user":
+        operation = db.get(AdminOperation, task.payload.get("admin_operation_id"))
+        if operation is not None:
+            operation.status = "failed"
+            operation.error_message = str(exc)
+            operation.finished_at = utcnow()
     ChatService(db).mark_assistant_failed(task, str(exc))
     tasks.mark_failed(task, str(exc))
 

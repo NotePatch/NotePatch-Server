@@ -61,6 +61,27 @@ services:
       embedding-service:
         condition: service_started
 
+  chat-worker:
+    <<: *backend
+    command: python -m notepatch.entrypoints.worker
+    restart: unless-stopped
+    environment:
+      NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
+      OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
+      OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      WORKER_QUEUES: ${CHAT_WORKER_QUEUES:-chat}
+    volumes:
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+
   ocr-worker:
     profiles: ["ocr"]
     build:

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from notepatch.modules.admin.api import admin
+from notepatch.modules.admin.api import admin, management
 from notepatch.modules.ai.api import ai
 from notepatch.modules.documents.api import artifacts, documents, webhooks
 from notepatch.modules.identity.api import auth, presence, workspaces
@@ -31,6 +31,7 @@ for router in (
     auth.router,
     workspaces.router,
     admin.router,
+    management.router,
     documents.router,
     artifacts.router,
     tasks.router,

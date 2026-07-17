@@ -11,6 +11,11 @@ import { OverviewPage } from "./pages/Overview";
 import { SystemPage } from "./pages/System";
 import { TaskDetailPage, TasksPage } from "./pages/Tasks";
 import { UserDetailPage, UsersPage } from "./pages/Users";
+import { LearningDetailPage, LearningPage } from "./pages/Learning";
+import { HomeworkDetailPage, HomeworksPage, MistakesPage } from "./pages/Homeworks";
+import { ConversationsPage } from "./pages/Conversations";
+import { OperationsPage } from "./pages/Operations";
+import { KnowledgePage } from "./pages/Knowledge";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -49,8 +54,16 @@ function App() {
             <Route path="/users/:userId" element={<UserDetailPage />} />
             <Route path="/documents" element={<DocumentsPage />} />
             <Route path="/documents/:documentId" element={<DocumentDetailPage />} />
+            <Route path="/learning" element={<LearningPage />} />
+            <Route path="/learning/:learningUnitId" element={<LearningDetailPage />} />
+            <Route path="/knowledge" element={<KnowledgePage />} />
+            <Route path="/homeworks" element={<HomeworksPage />} />
+            <Route path="/homeworks/:homeworkId" element={<HomeworkDetailPage />} />
+            <Route path="/mistakes" element={<MistakesPage />} />
+            <Route path="/conversations" element={<ConversationsPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/tasks/:taskId" element={<TaskDetailPage />} />
+            <Route path="/operations" element={<OperationsPage />} />
             <Route path="/system" element={<SystemPage />} />
           </Route>
         </Routes>

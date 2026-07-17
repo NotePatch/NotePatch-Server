@@ -19,6 +19,7 @@ TASK_TYPES = {
     "openclaw_agent_run",
     "document_processing_pipeline",
     "purge_document",
+    "purge_user",
 }
 TASK_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
 

@@ -34,6 +34,10 @@ def process_openclaw_chat(
         workspace_id=task.workspace_id,
         task_id=task.id,
     )
+    task.payload = {
+        **(task.payload or {}),
+        "mirrored_document_ids": runtime.get("mirrored_document_ids", []),
+    }
     tasks.ensure_active(task)
     tasks.add_event(
         task,
@@ -130,7 +134,16 @@ def process_openclaw_chat(
         output_keys[0] if output_keys else None,
     )
     runner.cleanup(task.workspace_id, task.id)
-    ChatService(db).mark_assistant_succeeded(task, answer.strip())
+    result_citations = [
+        {
+            "chunk_id": item["id"],
+            "document_id": item["document_id"],
+            "score": item["score"],
+            "metadata": item["metadata"],
+        }
+        for item in citations
+    ]
+    ChatService(db).mark_assistant_succeeded(task, answer.strip(), citations=result_citations)
     tasks.mark_succeeded(
         task,
         {
@@ -139,15 +152,7 @@ def process_openclaw_chat(
             "gateway_container": runtime["container_name"],
             "output_key": output_key,
             "output_keys": output_keys,
-            "citations": [
-                {
-                    "chunk_id": item["id"],
-                    "document_id": item["document_id"],
-                    "score": item["score"],
-                    "metadata": item["metadata"],
-                }
-                for item in citations
-            ],
+            "citations": result_citations,
         },
     )
 

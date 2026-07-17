@@ -55,6 +55,11 @@ class OpenClawSkillRunner:
             workspace_id=task.workspace_id,
             task_id=task.id,
         )
+        task.payload = {
+            **(task.payload or {}),
+            "mirrored_document_ids": runtime.get("mirrored_document_ids", []),
+        }
+        self.db.commit()
         input_dir = Path(runtime["host_task_input_dir"])
         output_dir = Path(runtime["host_task_output_dir"])
         input_dir.mkdir(parents=True, exist_ok=True)

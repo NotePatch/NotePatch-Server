@@ -1,7 +1,7 @@
-import { Download, Search } from "lucide-react";
+import { Download, Play, Search, Trash2 } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Pagination } from "../components/Pagination";
 import { StatusBadge } from "../components/StatusBadge";
@@ -160,6 +160,7 @@ export function DocumentsPage() {
 
 export function DocumentDetailPage() {
   const { documentId } = useParams();
+  const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: ["document", documentId],
     queryFn: () => apiRequest<AdminDocumentDetail>(`/admin/documents/${documentId}`)
@@ -173,6 +174,14 @@ export function DocumentDetailPage() {
     mutationFn: (path: string) => apiRequest<DownloadUrl>(path),
     onSuccess: (payload) => window.open(payload.download_url, "_blank", "noopener,noreferrer")
   });
+  const process = useMutation({
+    mutationFn: () => apiRequest(`/admin/documents/${documentId}/process`, { method: "POST", body: JSON.stringify({ force_reprocess: true }) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document", documentId] })
+  });
+  const remove = useMutation({
+    mutationFn: () => apiRequest(`/admin/documents/${documentId}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document", documentId] })
+  });
   const document = detail.data?.document;
 
   return (
@@ -182,7 +191,8 @@ export function DocumentDetailPage() {
           <h1>{document?.title || document?.original_filename || "文档"}</h1>
           <p>{document?.id || ""}</p>
         </div>
-        {document ? (
+        {document ? (<div className="button-row">
+          <button className="secondary-button" onClick={() => process.mutate()}><Play size={16}/>重新处理</button>
           <button
             className="secondary-button"
             onClick={() => download.mutate(`/admin/documents/${document.id}/download-url`)}
@@ -190,10 +200,12 @@ export function DocumentDetailPage() {
             <Download size={16} />
             原文件
           </button>
-        ) : null}
+          <button className="secondary-button danger-button" onClick={() => window.confirm("异步彻底清理该文档？") && remove.mutate()}><Trash2 size={16}/>删除</button>
+        </div>) : null}
       </div>
       {detail.error ? <div className="error-banner">{detail.error.message}</div> : null}
       {download.error ? <div className="error-banner">{download.error.message}</div> : null}
+      {process.error || remove.error ? <div className="error-banner">{(process.error || remove.error)?.message}</div> : null}
       {detail.data ? (
         <div className="detail-grid">
           <section className="panel wide">

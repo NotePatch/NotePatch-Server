@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from notepatch.platform.config import get_settings
+from notepatch.modules.ai.models.chat import ChatConversation, ChatMessage
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.learning.models.homework import GradingResult, Homework, HomeworkReference, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
@@ -380,6 +381,107 @@ def test_document_purge_is_idempotent_and_removes_content(
     assert completed.json()["purge_task_id"] == purge_task_id
 
 
+def test_document_purge_preserves_completed_chat_text_and_redacts_citations(
+    client, db_sessionmaker, fake_storage, monkeypatch
+):
+    monkeypatch.setattr("notepatch.modules.documents.services.tusd.TusdService.terminate_upload", lambda *_args, **_kwargs: None)
+    user = register_user(client, "purge-chat-source@example.com")
+    token = user["access_token"]
+    workspace_id = first_workspace_id(client, token)
+    upload = _create_upload(client, token, workspace_id)
+    _complete_upload(client, fake_storage, token, workspace_id, upload)
+    document_id = upload["document"]["id"]
+
+    with db_sessionmaker() as db:
+        conversation = ChatConversation(
+            workspace_id=workspace_id,
+            user_id=user["user"]["id"],
+            title="Referenced answer",
+        )
+        db.add(conversation)
+        db.flush()
+        citation = {"document_id": document_id, "chunk_id": "chunk-1", "score": 0.9, "metadata": {}}
+        chat_task = Task(
+            workspace_id=workspace_id,
+            task_type="openclaw_agent_run",
+            status="succeeded",
+            resource_type="chat_conversation",
+            resource_id=conversation.id,
+            payload={"conversation_id": conversation.id, "mirrored_document_ids": [document_id]},
+            result={"answer": "Preserved answer", "citations": [citation]},
+            progress=100,
+        )
+        db.add(chat_task)
+        db.flush()
+        message = ChatMessage(
+            workspace_id=workspace_id,
+            conversation_id=conversation.id,
+            user_id=user["user"]["id"],
+            role="assistant",
+            content="Preserved answer",
+            task_id=chat_task.id,
+            status="succeeded",
+            citations=[citation],
+            source_status="available",
+        )
+        db.add(message)
+        db.commit()
+        task_id = chat_task.id
+        message_id = message.id
+
+    deleted = client.delete(
+        f"/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+        headers=auth_headers(token),
+    )
+    assert deleted.status_code == 202
+    with db_sessionmaker() as db:
+        process_task(db, deleted.json()["purge_task_id"], storage=fake_storage)
+        message = db.get(ChatMessage, message_id)
+        chat_task = db.get(Task, task_id)
+        assert message.content == "Preserved answer"
+        assert message.status == "succeeded"
+        assert message.error_message is None
+        assert message.citations == []
+        assert message.source_status == "unavailable"
+        assert chat_task.result["answer"] == "Preserved answer"
+        assert chat_task.result["citations"] == []
+        assert chat_task.result["source_status"] == "unavailable"
+
+
+def test_document_delete_cancels_running_chat_that_mirrored_the_document(
+    client, db_sessionmaker, fake_storage
+):
+    user = register_user(client, "purge-running-chat@example.com")
+    token = user["access_token"]
+    workspace_id = first_workspace_id(client, token)
+    upload = _create_upload(client, token, workspace_id)
+    _complete_upload(client, fake_storage, token, workspace_id, upload)
+    document_id = upload["document"]["id"]
+
+    with db_sessionmaker() as db:
+        task = Task(
+            workspace_id=workspace_id,
+            task_type="openclaw_agent_run",
+            status="running",
+            resource_type="chat_conversation",
+            resource_id="conversation-id",
+            payload={"mirrored_document_ids": [document_id]},
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    deleted = client.delete(
+        f"/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+        headers=auth_headers(token),
+    )
+    assert deleted.status_code == 202
+    with db_sessionmaker() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "running"
+        assert task.cancel_requested_at is not None
+
+
 def test_purging_answer_key_clears_affected_grading_and_preserves_other_source(
     client, db_sessionmaker, fake_storage, monkeypatch
 ):
@@ -400,13 +502,13 @@ def test_purging_answer_key_clears_affected_grading_and_preserves_other_source(
     source_id = source_upload["document"]["id"]
     answer_id = answer_upload["document"]["id"]
 
-    note_key = f"workspaces/{workspace_id}/learning-units/unit/notes/version/study_note.md"
+    note_key = f"workspaces/{workspace_id}/learning-units/unit/notes/version/study_note.html"
     note_json_key = f"workspaces/{workspace_id}/learning-units/unit/notes/version/study_note.json"
     fake_storage.objects[(fake_storage.bucket, note_key)] = {
         "file_size": 4,
-        "mime_type": "text/markdown",
+        "mime_type": "text/html",
         "metadata": {},
-        "body": b"note",
+        "body": b"<article>note</article>",
     }
     fake_storage.objects[(fake_storage.bucket, note_json_key)] = {
         "file_size": 2,
@@ -497,7 +599,7 @@ def test_purging_answer_key_clears_affected_grading_and_preserves_other_source(
             learning_unit_id=unit.id,
             version_no=1,
             title="Old note",
-            markdown_object_key=note_key,
+            html_object_key=note_key,
             json_object_key=note_json_key,
             source_document_ids=[source_id, answer_id],
             source_mistake_ids=[mistake.id],

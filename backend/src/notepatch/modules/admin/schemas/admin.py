@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
 
 class AdminUserRead(BaseModel):
@@ -10,6 +10,8 @@ class AdminUserRead(BaseModel):
     username: str | None = None
     phone: str | None = None
     is_active: bool
+    must_change_password: bool
+    ai_history_enabled: bool
     created_at: datetime
 
 
@@ -170,9 +172,115 @@ class AdminOverviewResponse(BaseModel):
     queued_tasks_count: int
     running_tasks_count: int
     ocr_artifacts_count: int
+    learning_units_count: int
+    study_notes_count: int
+    homeworks_count: int
+    open_mistakes_count: int
     queue_lengths: list[AdminQueueStatus]
 
 
 class AdminMeResponse(BaseModel):
     user: AdminUserRead
     admin: bool
+
+
+class AdminUserCreate(BaseModel):
+    email: EmailStr
+    full_name: str | None = Field(default=None, max_length=255)
+    username: str | None = Field(default=None, max_length=64)
+    phone: str | None = Field(default=None, max_length=32)
+
+
+class AdminUserUpdate(BaseModel):
+    email: EmailStr | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+    username: str | None = Field(default=None, max_length=64)
+    phone: str | None = Field(default=None, max_length=32)
+    is_active: bool | None = None
+    ai_history_enabled: bool | None = None
+
+
+class AdminPasswordResetResponse(BaseModel):
+    user_id: str
+    temporary_password: str
+    must_change_password: bool = True
+
+
+class AdminUserProvisionResponse(BaseModel):
+    user: AdminUserRead
+    temporary_password: str
+
+
+class AdminActionResponse(BaseModel):
+    ok: bool = True
+    task_id: str | None = None
+    operation_id: str | None = None
+
+
+class AdminOperationRead(BaseModel):
+    id: str
+    actor_user_id: str | None = None
+    operation_type: str
+    target_type: str
+    target_id: str
+    status: str
+    phase: str | None = None
+    task_id: str | None = None
+    result: dict | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminOperationListResponse(AdminPageMeta):
+    items: list[AdminOperationRead]
+
+
+class AdminAuditLogRead(BaseModel):
+    id: str
+    actor_user_id: str | None = None
+    actor_email: str
+    action: str
+    target_type: str
+    target_id: str
+    workspace_id: str | None = None
+    before_data: dict | None = None
+    after_data: dict | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminAuditLogListResponse(AdminPageMeta):
+    items: list[AdminAuditLogRead]
+
+
+class AdminLearningUnitUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    subject: str | None = Field(default=None, max_length=64)
+    grade_level: str | None = Field(default=None, max_length=64)
+    topic: str | None = Field(default=None, max_length=255)
+
+
+class AdminProcessRequest(BaseModel):
+    force_reprocess: bool = False
+
+
+class AdminHomeworkCreate(BaseModel):
+    workspace_id: str
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    document_id: str | None = None
+    rubric_text: str | None = None
+    max_score: float = Field(default=100.0, gt=0)
+
+
+class AdminKnowledgeSearchRequest(BaseModel):
+    workspace_id: str
+    query: str = Field(min_length=1, max_length=8000)
+    learning_unit_id: str | None = None
+    subject: str | None = None
+    limit: int = Field(default=6, ge=1, le=20)

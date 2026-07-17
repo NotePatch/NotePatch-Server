@@ -1,4 +1,4 @@
-import { Activity, FileText, ListChecks, LogOut, Server, Users } from "lucide-react";
+import { Activity, BookOpen, Brain, CircleAlert, FileText, GraduationCap, ListChecks, LogOut, MessageSquare, Server, ShieldCheck, Users } from "lucide-react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -8,7 +8,13 @@ const navItems = [
   { to: "/", label: "总览", icon: Activity },
   { to: "/users", label: "用户", icon: Users },
   { to: "/documents", label: "文档", icon: FileText },
+  { to: "/learning", label: "学习与笔记", icon: BookOpen },
+  { to: "/knowledge", label: "知识库", icon: Brain },
+  { to: "/homeworks", label: "作业", icon: GraduationCap },
+  { to: "/mistakes", label: "错题", icon: CircleAlert },
+  { to: "/conversations", label: "会话", icon: MessageSquare },
   { to: "/tasks", label: "任务", icon: ListChecks },
+  { to: "/operations", label: "操作审计", icon: ShieldCheck },
   { to: "/system", label: "系统", icon: Server }
 ];
 

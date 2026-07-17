@@ -3,7 +3,13 @@ from sqlalchemy import select
 from notepatch.platform.config import get_settings
 from notepatch.modules.learning.models.homework import GradingResult, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
-from notepatch.modules.learning.models.learning import LearningUnit, StudyNoteVersion
+from notepatch.modules.learning.models.learning import (
+    Flashcard,
+    FlashcardDeck,
+    KnowledgePointAttempt,
+    LearningUnit,
+    StudyNoteVersion,
+)
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.executor import process_task
 from tests.conftest import auth_headers, first_workspace_id, register_user
@@ -104,8 +110,13 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
 
             note = db.scalar(select(StudyNoteVersion).where(StudyNoteVersion.workspace_id == workspace_id))
             assert note is not None
-            assert note.markdown_object_key in {key[1] for key in fake_storage.objects}
+            assert note.html_object_key in {key[1] for key in fake_storage.objects}
             assert note.json_object_key in {key[1] for key in fake_storage.objects}
+            flashcard_task = _latest_task(db, workspace_id, "generate_flashcards", learning_unit.id)
+            process_task(db, flashcard_task.id, storage=fake_storage)
+            deck = db.scalar(select(FlashcardDeck).where(FlashcardDeck.learning_unit_id == learning_unit.id))
+            assert deck is not None
+            assert db.scalar(select(Flashcard).where(Flashcard.deck_id == deck.id)) is not None
 
         units = client.get(f"/api/v1/workspaces/{workspace_id}/learning-units", headers=auth_headers(user["access_token"]))
         assert units.status_code == 200, units.text
@@ -116,7 +127,7 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
             headers=auth_headers(user["access_token"]),
         )
         assert notes.status_code == 200, notes.text
-        assert notes.json()[0]["download_urls"]["markdown"].startswith("mock://download/")
+        assert notes.json()[0]["download_urls"]["html"].startswith("mock://download/")
     finally:
         settings.auto_learning_pipeline = old_auto
 
@@ -166,6 +177,9 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
             assert grading.grading_mode == "provisional"
             assert grading.confidence == 0.8
             assert db.scalar(select(Mistake).where(Mistake.workspace_id == workspace_id)) is not None
+            assert db.scalar(
+                select(KnowledgePointAttempt).where(KnowledgePointAttempt.workspace_id == workspace_id)
+            ) is not None
             mistake_chunks = db.scalars(
                 select(KnowledgeChunk).where(
                     KnowledgeChunk.workspace_id == workspace_id,
@@ -178,16 +192,16 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
             process_task(db, highlight_task.id, storage=fake_storage)
             note = db.scalar(select(StudyNoteVersion).where(StudyNoteVersion.workspace_id == workspace_id))
             assert note is not None
-            assert note.highlighted_object_key is not None
-            highlighted = fake_storage.objects[(fake_storage.bucket, note.highlighted_object_key)]["body"].decode()
-            assert "**" in highlighted
+            assert note.highlighted_html_object_key is not None
+            highlighted = fake_storage.objects[(fake_storage.bucket, note.highlighted_html_object_key)]["body"].decode()
+            assert "<article" in highlighted
 
         detail = client.get(
             f"/api/v1/workspaces/{workspace_id}/learning-units/{learning_unit.id}?include_download_url=true",
             headers=auth_headers(user["access_token"]),
         )
         assert detail.status_code == 200, detail.text
-        assert detail.json()["latest_note"]["download_urls"]["highlighted"].startswith("mock://download/")
+        assert detail.json()["latest_note"]["download_urls"]["highlighted_html"].startswith("mock://download/")
     finally:
         settings.auto_learning_pipeline = old_auto
 
@@ -218,5 +232,43 @@ def test_learning_unit_api_is_workspace_scoped(client, db_sessionmaker, fake_sto
             headers=auth_headers(bob["access_token"]),
         )
         assert response.status_code == 404
+    finally:
+        settings.auto_learning_pipeline = old_auto
+
+
+def test_grading_without_study_note_skips_highlight_task(client, db_sessionmaker, fake_storage):
+    settings, old_auto = _set_auto_learning(True)
+    try:
+        user = register_user(client, "learning-no-note@example.com")
+        workspace_id = first_workspace_id(client, user["access_token"])
+        homework = _create_and_complete_document(
+            client,
+            fake_storage,
+            user["access_token"],
+            workspace_id,
+            filename="homework-without-notes.png",
+            document_kind="homework",
+            metadata={"learning_unit_title": "No Courseware Yet", "subject": "math"},
+        )
+        document_id = homework["document"]["id"]
+        with db_sessionmaker() as db:
+            process_task(
+                db,
+                _latest_task(db, workspace_id, "document_processing_pipeline", document_id).id,
+                storage=fake_storage,
+                doctr_client=FailingDocTrClient(),
+            )
+            process_task(db, _latest_task(db, workspace_id, "extract_questions", document_id).id, storage=fake_storage)
+            grade_task = _latest_task(db, workspace_id, "grade_homework")
+            process_task(db, grade_task.id, storage=fake_storage)
+            db.refresh(grade_task)
+            assert grade_task.status == "succeeded"
+            assert grade_task.result["note_highlight_status"] == "skipped_no_study_note"
+            assert db.scalar(
+                select(Task).where(
+                    Task.workspace_id == workspace_id,
+                    Task.task_type == "highlight_study_notes",
+                )
+            ) is None
     finally:
         settings.auto_learning_pipeline = old_auto

@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
+    refresh_token_rotation_grace_seconds: int = 10
     admin_emails: str = ""
     admin_web_origin: str = "http://localhost:5173"
 
@@ -20,8 +21,10 @@ class Settings(BaseSettings):
     redis_task_retry_queue: str = "notepatch:task-retries"
     default_queue_name: str = "default"
     ocr_queue_name: str = "ocr"
+    chat_queue_name: str = "chat"
     worker_queues: str = "default"
     ocr_worker_queues: str = "ocr"
+    chat_worker_queues: str = "chat"
     presence_heartbeat_interval_seconds: int = 30
     presence_session_ttl_seconds: int = 90
     presence_offline_grace_seconds: int = 600
@@ -80,6 +83,17 @@ class Settings(BaseSettings):
     openai_organization: str | None = None
     openai_project: str | None = None
     ai_chat_history_message_limit: int = 20
+    study_note_debounce_seconds: int = 300
+    knowledge_point_match_threshold: float = 0.88
+    flashcard_error_half_life_days: float = 30.0
+    flashcard_success_half_life_days: float = 14.0
+    flashcard_error_multiplier: float = 2.5
+    flashcard_success_multiplier: float = 0.8
+    flashcard_correct_streak_multiplier: float = 0.7
+    flashcard_max_correct_streak: int = 5
+    flashcard_max_cards: int = 40
+    note_highlight_red_threshold: float = 3.0
+    note_highlight_yellow_threshold: float = 1.5
 
     doctr_enabled: bool = True
     doctr_base_url: str = "http://docserver:8000"

@@ -1,7 +1,7 @@
-import { Search } from "lucide-react";
+import { RotateCcw, Search, XCircle } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { Pagination } from "../components/Pagination";
 import { StatusBadge } from "../components/StatusBadge";
@@ -138,6 +138,7 @@ export function TasksPage() {
 
 export function TaskDetailPage() {
   const { taskId } = useParams();
+  const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: ["task", taskId],
     queryFn: () => apiRequest<AdminTaskDetail>(`/admin/tasks/${taskId}`)
@@ -148,6 +149,8 @@ export function TaskDetailPage() {
     enabled: Boolean(taskId),
     refetchInterval: detail.data?.task.status === "running" || detail.data?.task.status === "queued" ? 3000 : false
   });
+  const cancel = useMutation({ mutationFn: () => apiRequest(`/admin/tasks/${taskId}/cancel`, { method: "POST", body: "{}" }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["task", taskId] }) });
+  const retry = useMutation({ mutationFn: () => apiRequest(`/admin/tasks/${taskId}/retry`, { method: "POST", body: "{}" }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks"] }) });
 
   return (
     <section className="page">
@@ -155,9 +158,10 @@ export function TaskDetailPage() {
         <div>
           <h1>{detail.data?.task.task_type || "任务"}</h1>
           <p>{detail.data?.task.id || ""}</p>
-        </div>
+        </div><div className="button-row">{detail.data?.task.status === "queued" || detail.data?.task.status === "running" ? <button className="secondary-button" onClick={() => cancel.mutate()}><XCircle size={16}/>取消</button> : null}{detail.data?.task.status === "failed" || detail.data?.task.status === "cancelled" ? <button className="secondary-button" onClick={() => retry.mutate()}><RotateCcw size={16}/>重试</button> : null}</div>
       </div>
       {detail.error ? <div className="error-banner">{detail.error.message}</div> : null}
+      {cancel.error || retry.error ? <div className="error-banner">{(cancel.error || retry.error)?.message}</div> : null}
       {detail.data ? (
         <div className="detail-grid">
           <section className="panel">

@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -27,7 +28,7 @@ def _create_token(subject: str, token_type: str, expires_delta: timedelta) -> tu
     settings = get_settings()
     now = datetime.now(timezone.utc)
     expires_at = now + expires_delta
-    payload = {"sub": subject, "type": token_type, "iat": now, "exp": expires_at}
+    payload = {"sub": subject, "type": token_type, "iat": now, "exp": expires_at, "jti": str(uuid.uuid4())}
     return jwt.encode(payload, settings.effective_secret_key, algorithm=settings.jwt_algorithm), expires_at
 
 

@@ -92,6 +92,9 @@ class Mistake(Base):
         String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     question_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("questions.id"), nullable=True)
+    knowledge_point_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("knowledge_points.id", ondelete="SET NULL"), nullable=True
+    )
     grading_result_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("grading_results.id"), nullable=True)
     student_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     subject: Mapped[str | None] = mapped_column(String(64), nullable=True)

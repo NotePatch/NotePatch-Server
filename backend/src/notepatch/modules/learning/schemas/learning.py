@@ -14,6 +14,10 @@ class LearningUnitRead(ORMModel):
     grade_level: str | None = None
     topic: str | None = None
     metadata: dict = metadata_field()
+    knowledge_revision: int = 0
+    attempt_revision: int = 0
+    notes_generated_revision: int = 0
+    note_generation_due_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -50,12 +54,17 @@ class StudyNoteVersionRead(ORMModel):
     task_id: str | None = None
     version_no: int
     title: str
-    markdown_object_key: str
+    html_object_key: str
     json_object_key: str
-    highlighted_object_key: str | None = None
+    highlighted_html_object_key: str | None = None
     highlight_map_object_key: str | None = None
+    knowledge_point_ids: list = Field(default_factory=list)
     source_document_ids: list = Field(default_factory=list)
     source_mistake_ids: list = Field(default_factory=list)
+    source_version_id: str | None = None
+    edited_by_user_id: str | None = None
+    edit_origin: str | None = None
+    edit_summary: str | None = None
     metadata: dict = metadata_field()
     created_at: datetime
     download_urls: dict[str, str] | None = None
@@ -70,7 +79,49 @@ class LearningUnitDetailResponse(BaseModel):
 class StudyNoteDownloadUrlResponse(BaseModel):
     note_version_id: str
     learning_unit_id: str
-    kind: Literal["markdown", "json", "highlighted", "highlight_map"]
+    kind: Literal["html", "json", "highlighted_html", "highlight_map"]
     filename: str
     expires_in: int
     download_url: str
+
+
+class StudyNoteRevisionCreate(BaseModel):
+    html: str = Field(min_length=1, max_length=2_000_000)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    edit_summary: str | None = Field(default=None, max_length=500)
+
+
+class StudyNoteRevisionResponse(BaseModel):
+    note: StudyNoteVersionRead
+    downstream_tasks: list[dict] = Field(default_factory=list)
+
+
+class FlashcardRead(ORMModel):
+    id: str
+    knowledge_point_id: str
+    front: str
+    back: str
+    priority_score: float
+    priority_factors: dict = Field(default_factory=dict)
+    source_refs: list = Field(default_factory=list)
+    difficulty: str | None = None
+    rank: int
+    created_at: datetime
+
+
+class FlashcardDeckRead(ORMModel):
+    id: str
+    workspace_id: str
+    learning_unit_id: str
+    study_note_version_id: str
+    task_id: str | None = None
+    version_no: int
+    attempt_revision: int
+    weighting_config: dict = Field(default_factory=dict)
+    metadata: dict = metadata_field()
+    created_at: datetime
+
+
+class FlashcardDeckDetail(BaseModel):
+    deck: FlashcardDeckRead
+    cards: list[FlashcardRead]

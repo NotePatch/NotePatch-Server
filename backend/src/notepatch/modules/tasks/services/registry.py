@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.gateway import OpenClawRunner
+from notepatch.modules.admin.services.operations import UserPurgeExecutor
 from notepatch.modules.ai.services.task_handler import process_openclaw_chat
 from notepatch.modules.documents.ocr import OcrPipeline
 from notepatch.modules.documents.services.doctr import DocTrClient
@@ -76,6 +77,11 @@ def execute_registered_task(context: TaskExecutionContext) -> None:
         context.tasks.add_event(task, "document_purge_started", "Document purge started", progress=10)
         context.db.commit()
         result = DocumentPurgeService(context.db, context.storage).purge(task)
+        context.tasks.mark_succeeded(task, result)
+    elif task.task_type == "purge_user":
+        context.tasks.add_event(task, "user_purge_started", "User purge started", progress=10)
+        context.db.commit()
+        result = UserPurgeExecutor(context.db, context.storage).execute(task)
         context.tasks.mark_succeeded(task, result)
     elif task.task_type == "openclaw_agent_run":
         process_openclaw_chat(

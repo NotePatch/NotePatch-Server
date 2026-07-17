@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+import shutil
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,7 @@ from notepatch.modules.identity.models.user import User
 from notepatch.modules.identity.models.workspace import Workspace
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.identity.services.presence import PresenceService
+from notepatch.modules.admin.models.admin import AdminOperation
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,15 @@ class OpenClawContainerManager:
             self._stop_container(container)
             return True
         return False
+
+    def remove_user(self, user_id: str) -> None:
+        container = self._get_container(self.runtime.container_name(user_id))
+        if container is not None:
+            container.reload()
+            if getattr(container, "status", None) == "running":
+                self._stop_container(container)
+            container.remove()
+        shutil.rmtree(self.runtime.user_root(user_id), ignore_errors=True)
 
     def managed_containers(self) -> list:
         return self.docker.containers.list(
@@ -243,6 +254,7 @@ class OpenClawSupervisor:
         self.containers = container_manager or OpenClawContainerManager()
 
     def run_once(self) -> None:
+        self._process_runtime_cleanup_requests()
         try:
             online_user_ids = self.presence.online_user_ids()
             tracked_user_ids = self.presence.tracked_user_ids()
@@ -255,6 +267,25 @@ class OpenClawSupervisor:
             for user_id in sorted(online_user_ids | active_task_user_ids):
                 self._ensure_online_user(db, user_id)
             self._stop_offline_users(db, online_user_ids, tracked_user_ids)
+
+    def _process_runtime_cleanup_requests(self) -> None:
+        with self.db_factory() as db:
+            operations = db.scalars(
+                select(AdminOperation).where(
+                    AdminOperation.operation_type == "purge_user",
+                    AdminOperation.status.in_(("queued", "running")),
+                    AdminOperation.phase == "runtime_cleanup_requested",
+                )
+            ).all()
+            for operation in operations:
+                try:
+                    self.containers.remove_user(operation.target_id)
+                    operation.phase = "runtime_cleanup_completed"
+                    db.commit()
+                except Exception as exc:
+                    operation.error_message = f"OpenClaw runtime cleanup failed: {exc}"
+                    db.commit()
+                    logger.exception("Could not remove OpenClaw runtime for user %s", operation.target_id)
 
     def run_forever(self, should_stop=lambda: False) -> None:
         while not should_stop():

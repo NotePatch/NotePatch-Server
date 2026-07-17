@@ -4,12 +4,25 @@ from sqlalchemy import select
 
 from notepatch.modules.learning.models.homework import GradingResult, Homework, Mistake, Question
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
-from notepatch.modules.learning.models.learning import StudyNoteVersion
+from notepatch.modules.learning.models.learning import (
+    KnowledgePoint,
+    KnowledgePointAttempt,
+    StudyNoteVersion,
+)
 from notepatch.modules.learning.schemas.skills import GradingSkillResult, NoteHighlightResult
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.platform.storage import StorageService
+from notepatch.modules.learning.services.flashcard_priority import FlashcardPriorityService
+from notepatch.modules.learning.services.html_notes import (
+    referenced_knowledge_point_ids,
+    sanitize_note_html,
+    validate_knowledge_point_references,
+)
+from notepatch.modules.learning.services.knowledge_points import KnowledgePointService
+from notepatch.platform.config import get_settings
+from notepatch.platform.database import utcnow
 
 
 class LearningGradingOperations:
@@ -25,6 +38,12 @@ class LearningGradingOperations:
             select(Question).where(Question.workspace_id == task.workspace_id, Question.homework_id == homework.id)
         ).all()
         references = self._grading_references(homework)
+        canonical_points = self.db.scalars(
+            select(KnowledgePoint).where(
+                KnowledgePoint.workspace_id == task.workspace_id,
+                KnowledgePoint.learning_unit_id == unit.id,
+            )
+        ).all() if unit else []
         official_basis = bool(homework.rubric_text or references)
         result, run = self._skill().execute(
             task=task,
@@ -42,6 +61,7 @@ class LearningGradingOperations:
                 ],
                 "references": references,
                 "knowledge_chunks": [self._chunk_payload(chunk) for chunk in self._unit_chunks(unit.id, task.workspace_id)] if unit else [],
+                "knowledge_points": [{"id": point.id, "name": point.name} for point in canonical_points],
                 "required_grading_mode": "official" if official_basis else "provisional",
             },
             output_filename="grading_report.json",
@@ -66,12 +86,70 @@ class LearningGradingOperations:
         )
         self.db.add(grading)
         self.db.flush()
+        point_by_id = {point.id: point for point in canonical_points}
+        point_by_name: dict[str, KnowledgePoint] = {}
+        if unit is not None:
+            unresolved_names = list(
+                dict.fromkeys(
+                    [
+                        reference.name
+                        for question_result in result.per_question
+                        for reference in question_result.knowledge_points
+                        if not reference.id or reference.id not in point_by_id
+                    ]
+                    + [item.knowledge_point for item in result.mistakes]
+                )
+            )
+            point_by_name = KnowledgePointService(
+                self.db,
+                self.embedding_client,
+                match_threshold=get_settings().knowledge_point_match_threshold,
+            ).resolve_many(
+                unit=unit,
+                names=unresolved_names,
+                source_document_ids=[document.id],
+                owner=f"task:{task.id}:grading-knowledge-points",
+            )
+
+        def resolved_point(reference) -> KnowledgePoint | None:
+            return point_by_id.get(reference.id) or point_by_name.get(reference.name)
+
+        questions_by_sequence = {question.sequence_no: question for question in questions}
+        attempts_created = 0
+        for question_result in result.per_question:
+            ratio = min(max(question_result.score / question_result.max_score, 0.0), 1.0)
+            outcome = "correct" if ratio >= 0.999 else "incorrect" if ratio <= 0.001 else "partial"
+            question = questions_by_sequence.get(question_result.sequence_no)
+            for reference in question_result.knowledge_points:
+                point = resolved_point(reference)
+                if point is None or unit is None:
+                    continue
+                self.db.add(
+                    KnowledgePointAttempt(
+                        workspace_id=task.workspace_id,
+                        learning_unit_id=unit.id,
+                        knowledge_point_id=point.id,
+                        student_user_id=task.payload.get("student_user_id"),
+                        homework_id=homework.id,
+                        grading_result_id=grading.id,
+                        question_id=question.id if question else None,
+                        outcome=outcome,
+                        score_ratio=ratio,
+                        occurred_at=utcnow(),
+                        metadata_={"task_id": task.id, "sequence_no": question_result.sequence_no},
+                    )
+                )
+                attempts_created += 1
+        if unit is not None and attempts_created:
+            unit.attempt_revision += 1
         mistake_chunks: list[KnowledgeChunk] = []
         mistakes: list[Mistake] = []
         for item in result.mistakes:
+            point = point_by_name.get(item.knowledge_point)
             mistake = Mistake(
                 workspace_id=task.workspace_id,
                 grading_result_id=grading.id,
+                knowledge_point_id=point.id if point else None,
                 student_user_id=task.payload.get("student_user_id"),
                 subject=unit.subject if unit else None,
                 knowledge_point=item.knowledge_point,
@@ -121,7 +199,18 @@ class LearningGradingOperations:
         self._ensure_active(task)
         homework.status = "graded"
         self.db.commit()
-        if unit is not None and mistakes:
+        highlight_status = "not_applicable"
+        latest_note = None
+        if unit is not None:
+            latest_note = self.db.scalar(
+                select(StudyNoteVersion)
+                .where(
+                    StudyNoteVersion.workspace_id == task.workspace_id,
+                    StudyNoteVersion.learning_unit_id == unit.id,
+                )
+                .order_by(StudyNoteVersion.version_no.desc())
+            )
+        if unit is not None and latest_note is not None:
             self._ensure_active(task)
             self._create_unique_tasks(
                 [
@@ -133,11 +222,23 @@ class LearningGradingOperations:
                             "learning_unit_id": unit.id,
                             "mistake_ids": [mistake.id for mistake in mistakes],
                             "source_grading_result_id": grading.id,
+                            "expected_note_version_id": latest_note.id,
                         },
                     )
                 ],
                 force_reprocess=True,
             )
+            highlight_status = "queued"
+        elif unit is not None and mistakes:
+            highlight_status = "skipped_no_study_note"
+            self._record_task_event(
+                task,
+                "note_highlight_skipped",
+                {"reason": "no_study_note", "learning_unit_id": unit.id},
+            )
+        flashcard_task = None
+        if unit is not None and latest_note is not None:
+            flashcard_task = self.schedule_flashcards(unit, latest_note, reason="homework_graded")
         return {
             "homework_id": homework.id,
             "grading_result_id": grading.id,
@@ -147,6 +248,10 @@ class LearningGradingOperations:
             "confidence": result.confidence,
             "report_key": report_key,
             "mistakes_created": len(mistakes),
+            "note_highlight_status": highlight_status,
+            "attempts_created": attempts_created,
+            "attempt_revision": unit.attempt_revision if unit else None,
+            "flashcard_task_id": flashcard_task.id if flashcard_task else None,
         }
 
     def highlight_study_notes(self, task: Task, storage: StorageService) -> dict:
@@ -157,41 +262,104 @@ class LearningGradingOperations:
             .order_by(StudyNoteVersion.version_no.desc())
         )
         if note is None:
-            raise PermanentTaskError("Study note does not exist for highlighting")
+            return {"learning_unit_id": unit.id, "skipped": True, "reason": "no_study_note"}
         mistake_ids = task.payload.get("mistake_ids") if isinstance(task.payload.get("mistake_ids"), list) else []
         query = select(Mistake).where(Mistake.workspace_id == task.workspace_id)
         query = query.where(Mistake.id.in_(mistake_ids)) if mistake_ids else query.where(Mistake.status == "open")
         mistakes = self.db.scalars(query).all()
-        result, run = self._skill().execute(
-            task=task,
-            skill_name="notepatch_note_highlighter",
-            input_payload={
-                "learning_unit": self._learning_unit_payload(unit),
-                "study_note_markdown": self._download_text(storage, storage.bucket, note.markdown_object_key),
-                "mistakes": [
-                    {
-                        "id": item.id,
-                        "knowledge_point": item.knowledge_point,
-                        "description": item.description,
-                        "metadata": item.metadata_,
-                    }
-                    for item in mistakes
-                ],
-            },
-            output_filename="highlighted_note.json",
-            schema=NoteHighlightResult,
+        weighted = FlashcardPriorityService(self.db).calculate(
+            workspace_id=task.workspace_id,
+            learning_unit_id=unit.id,
+            note=note,
         )
+        highlighted_points = [item for item in weighted if item["highlight_level"] is not None]
+        source_html = self._download_text(storage, storage.bucket, note.html_object_key)
+        if highlighted_points:
+            result, run = self._skill().execute(
+                task=task,
+                skill_name="notepatch_note_highlighter",
+                input_payload={
+                    "learning_unit": self._learning_unit_payload(unit),
+                    "study_note_html": source_html,
+                    "weighted_knowledge_points": highlighted_points,
+                    "mistakes": [
+                        {
+                            "id": item.id,
+                            "knowledge_point_id": item.knowledge_point_id,
+                            "knowledge_point": item.knowledge_point,
+                            "description": item.description,
+                            "metadata": item.metadata_,
+                        }
+                        for item in mistakes
+                    ],
+                },
+                output_filename="highlighted_note.json",
+                schema=NoteHighlightResult,
+            )
+        else:
+            result = NoteHighlightResult.model_validate({"html": source_html, "highlight_map": {"items": []}})
+            run = {"output_key": None}
         self._ensure_active(task)
+        try:
+            highlighted_html = sanitize_note_html(result.html)
+            unit_point_ids = {
+                item.id
+                for item in self.db.scalars(
+                    select(KnowledgePoint).where(
+                        KnowledgePoint.workspace_id == task.workspace_id,
+                        KnowledgePoint.learning_unit_id == unit.id,
+                    )
+                ).all()
+            }
+            validate_knowledge_point_references(highlighted_html, unit_point_ids)
+        except ValueError as exc:
+            raise PermanentTaskError(str(exc)) from exc
+        latest = self.db.scalar(
+            select(StudyNoteVersion)
+            .where(
+                StudyNoteVersion.workspace_id == task.workspace_id,
+                StudyNoteVersion.learning_unit_id == unit.id,
+            )
+            .order_by(StudyNoteVersion.version_no.desc())
+        )
+        if latest is None:
+            return {"learning_unit_id": unit.id, "skipped": True, "reason": "no_study_note"}
+        if latest.id != note.id:
+            if isinstance(run.get("output_key"), str):
+                try:
+                    storage.delete_object(storage.bucket, run["output_key"])
+                except Exception:
+                    pass
+            replacement = TaskService(self.db).create_task(
+                workspace_id=task.workspace_id,
+                task_type="highlight_study_notes",
+                resource_type="learning_unit",
+                resource_id=unit.id,
+                payload={
+                    **(task.payload or {}),
+                    "expected_note_version_id": latest.id,
+                    "replaces_task_id": task.id,
+                },
+            )
+            return {
+                "learning_unit_id": unit.id,
+                "skipped": True,
+                "reason": "newer_note_version_available",
+                "replacement_task_id": replacement.id,
+            }
         highlighted_key = StorageService.learning_unit_note_key(
-            task.workspace_id, unit.id, note.id, "highlighted_note", "md"
+            task.workspace_id, unit.id, note.id, "highlighted_note", "html"
         )
         map_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, note.id, "highlight_map", "json")
-        self._put_text(storage, highlighted_key, result.markdown, "text/markdown; charset=utf-8")
+        self._put_text(storage, highlighted_key, highlighted_html, "text/html; charset=utf-8")
         storage.put_json_artifact(map_key, result.highlight_map.model_dump(mode="json"), bucket=storage.bucket)
         self._ensure_active(task)
-        note.highlighted_object_key = highlighted_key
+        note.highlighted_html_object_key = highlighted_key
         note.highlight_map_object_key = map_key
         note.source_mistake_ids = [mistake.id for mistake in mistakes]
+        note.knowledge_point_ids = list(
+            dict.fromkeys([*(note.knowledge_point_ids or []), *referenced_knowledge_point_ids(highlighted_html)])
+        )
         note.metadata_ = {**(note.metadata_ or {}), "highlight_skill_output_key": run["output_key"]}
         self.db.commit()
         return {

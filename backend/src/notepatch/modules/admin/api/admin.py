@@ -11,6 +11,8 @@ from notepatch.modules.documents.models.document import Document, DocumentArtifa
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.identity.models.workspace import Workspace
+from notepatch.modules.learning.models.homework import Homework, Mistake
+from notepatch.modules.learning.models.learning import LearningUnit, StudyNoteVersion
 from notepatch.modules.admin.schemas.admin import (
     AdminArtifactRead,
     AdminDocumentDetailResponse,
@@ -78,6 +80,8 @@ def _user_read(user: User) -> AdminUserRead:
         username=user.username,
         phone=user.phone,
         is_active=user.is_active,
+        must_change_password=user.must_change_password,
+        ai_history_enabled=user.ai_history_enabled,
         created_at=user.created_at,
     )
 
@@ -178,6 +182,12 @@ def overview(
             )
             or 0
         ),
+        learning_units_count=_count(db, LearningUnit.id),
+        study_notes_count=_count(db, StudyNoteVersion.id),
+        homeworks_count=_count(db, Homework.id),
+        open_mistakes_count=int(
+            db.scalar(select(func.count(Mistake.id)).where(Mistake.status == "open")) or 0
+        ),
         queue_lengths=queue_statuses(),
     )
 
@@ -253,6 +263,18 @@ def get_user_detail(
         )
         if workspace_id
         else 0,
+        "learning_units": int(
+            db.scalar(select(func.count(LearningUnit.id)).where(LearningUnit.workspace_id == workspace_id)) or 0
+        ) if workspace_id else 0,
+        "study_notes": int(
+            db.scalar(select(func.count(StudyNoteVersion.id)).where(StudyNoteVersion.workspace_id == workspace_id)) or 0
+        ) if workspace_id else 0,
+        "homeworks": int(
+            db.scalar(select(func.count(Homework.id)).where(Homework.workspace_id == workspace_id)) or 0
+        ) if workspace_id else 0,
+        "mistakes": int(
+            db.scalar(select(func.count(Mistake.id)).where(Mistake.workspace_id == workspace_id)) or 0
+        ) if workspace_id else 0,
     }
     return AdminUserDetailResponse(
         user=_user_read(user),

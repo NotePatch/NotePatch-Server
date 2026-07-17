@@ -88,8 +88,10 @@ REDIS_URL=redis://redis:6379/0
 REDIS_TASK_QUEUE=notepatch:tasks
 DEFAULT_QUEUE_NAME=default
 OCR_QUEUE_NAME=ocr
+CHAT_QUEUE_NAME=chat
 WORKER_QUEUES=default
 OCR_WORKER_QUEUES=ocr
+CHAT_WORKER_QUEUES=chat
 
 SEAWEEDFS_S3_ENDPOINT=http://seaweedfs-s3:8333
 SEAWEEDFS_ACCESS_KEY=notepatch
@@ -166,7 +168,7 @@ AUTO_LEARNING_PIPELINE=true
 
 ## Web Admin
 
-管理后台是运维排障工具，位于 `web/admin/`，使用 Vite React。它不替代用户端，也不直接访问 SeaweedFS、Redis、DocTr 或 OpenClaw；所有数据都通过 FastAPI 的 `/api/v1/admin/*` 读取。
+管理后台是运营与排障工具，位于 `web/admin/`，使用 Vite React。它不替代用户端，也不直接访问 SeaweedFS、Redis、DocTr 或 OpenClaw；所有读写都通过专用 FastAPI `/api/v1/admin/*` 接口并记录审计日志。
 
 启用管理员账号：
 
@@ -188,13 +190,19 @@ docker compose up -d --build api admin-web
 http://localhost:5173
 ```
 
-后台第一版只读优先，包含：
+后台包含：
 
 - 总览：用户、文档、任务、OCR artifact 和队列摘要。
 - 用户：全局用户搜索、personal workspace 和数据计数。
 - 文档：跨 workspace 文档检索、artifact metadata、原文件和 artifact download-url。
 - 任务：全局 task 查询、payload/result、task_events 时间线。
+- 学习：学习单元、知识块、HTML 笔记版本、安全预览、富文本编辑和加权闪卡。
+- 作业与错题：评分配置、references、触发批改、状态维护。
+- 会话：查看消息与软删除，不允许管理员冒充用户发送消息。
+- 运营操作：创建/编辑/禁用/重置/物理删除用户，文档 purge、任务取消/重试及完整审计。
 - 系统：Redis queue、DB、SeaweedFS、DocTr、OpenClaw 健康状态。
+
+管理员创建或重置用户后只返回一次临时密码。用户登录后必须调用 `POST /api/v1/auth/change-password`，完成前其他业务接口返回 `403 Password change required`。物理删除用户是异步操作，可在 `/api/v1/admin/operations` 查询阶段和错误。
 
 前端生产构建验证：
 
@@ -242,6 +250,8 @@ curl -s http://localhost:8001/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"password123"}'
 ```
+
+refresh token 使用 family 轮换，并通过 `REFRESH_TOKEN_ROTATION_GRACE_SECONDS`（默认 10 秒）容忍同一客户端的短暂并发刷新。客户端仍必须使用 single-flight，避免多个 401 同时发起 refresh；logout 会撤销当前登录 family，修改密码或禁用账号会撤销该用户全部 refresh token。
 
 当前用户：
 
@@ -500,12 +510,14 @@ docker compose \
 docker compose exec api python /opt/notepatch/scripts/provision_openclaw_users.py
 ```
 
-worker 运行 openclaw task 前，会把该用户 personal workspace 下 `uploaded/ready` 且 object key 仍属于当前 workspace 的 documents/artifacts 从 SeaweedFS 同步到：
+worker 运行 openclaw task 前，会把该用户 personal workspace 下 `uploaded/ready` 且 object key 仍属于当前 workspace 的 documents/artifacts 从 SeaweedFS 同步到任务独立快照：
 
 ```text
-workspace/notepatch/documents/
-workspace/notepatch/documents/index.json
+workspace/notepatch/openclaw/tasks/{task_id}/input/documents/
+workspace/notepatch/openclaw/tasks/{task_id}/input/documents/index.json
 ```
+
+每个 chat/skill task 使用自己的镜像目录，任务之间不会删除或覆盖彼此正在读取的文件。
 
 未完成上传、旧 workspace object key、缺少 `file_size`、或对象存储返回 404 的记录会被跳过并写入 `index.json` 的 `skipped_documents/skipped_artifacts`，同时出现在 `openclaw_prepare` task event 中；单个坏对象不会拖垮整次 OpenClaw task。非 404 存储错误仍会让任务失败。
 
@@ -579,8 +591,10 @@ DOCTR_ENABLED=false
 
 - `default` queue 使用 Redis key `notepatch:tasks`，普通 `worker` 默认只消费它。
 - `ocr` queue 使用 Redis key `notepatch:tasks:ocr`，GPU `ocr-worker` 只消费它。
+- `chat` queue 使用 Redis key `notepatch:tasks:chat`，常驻 `chat-worker` 独立消费交互式 OpenClaw 对话，避免被耗时学习任务阻塞。
 - `ocr_document` 和 `document_processing_pipeline` 都进入 `ocr` queue，普通 worker 不会加载 PaddleOCR。
-- `extract_questions`、`grade_homework`、`openclaw_agent_run`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 进入 `default` queue。
+- `openclaw_agent_run` 进入 `chat` queue。
+- `extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 进入 `default` queue。
 - 可恢复错误进入 Redis delayed-retry zset，按指数退避重新投递；不会阻塞 worker loop。
 
 worker 可用 CLI 或 env 指定队列：
@@ -588,6 +602,7 @@ worker 可用 CLI 或 env 指定队列：
 ```bash
 python -m notepatch.entrypoints.worker --queues default
 python -m notepatch.entrypoints.worker --queues ocr
+python -m notepatch.entrypoints.worker --queues chat
 WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 ```
 
@@ -599,7 +614,7 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 
 1. 用户上传课件、笔记、试卷或作业，文件内容进入 SeaweedFS，数据库只保存 metadata。
 2. 上传完成后进入 GPU OCR queue：图片先尝试 DocTr，PDF 渲染后由 PP-StructureV3 执行文字、版面、表格和公式识别，输出六类 OCR artifacts。
-3. `courseware/note/other` 经 `notepatch_kb_builder` 整理后由 BGE-M3 生成 1024 维向量并写入 pgvector，再依次执行电子笔记与闪卡 skills。
+3. `courseware/note/other` 经 `notepatch_kb_builder` 独立更新知识库；同一学习单元最后一次知识更新 5 分钟后，才开始执行 HTML 学霸笔记，笔记成功后再生成持久化闪卡。
 4. `homework/corrected_homework/exam` 先经 `notepatch_question_extractor` 生成真实题目。作业随后执行 grading skill。
 5. `answer_key/rubric` 只完成 OCR，作为 Homework references 的评分依据，不自动生成普通笔记。
 6. 有答案或 rubric 时为 `official` 评分；没有依据时必须为 `provisional` 诊断性评分并带置信度。
@@ -614,8 +629,33 @@ GET /workspaces/{workspace_id}/learning-units
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/knowledge-chunks
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes?include_download_url=true
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=markdown
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=html
+POST /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{latest_note_version_id}/revisions
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/latest
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/{deck_id}
 ```
+
+5 分钟是知识更新防抖窗口，不是笔记完成时限。到期后 `generate_study_notes` 还需要调用用户 OpenClaw gateway、校验结构化输出、清洗 HTML 并写入 SeaweedFS；可恢复错误最多重试 3 次，因此实际完成时间可能超过 5 分钟。客户端应按以下字段判断：
+
+- `knowledge_revision > notes_generated_revision`：最新知识尚未生成笔记，应继续轮询。
+- `note_generation_due_at != null`：笔记已安排或仍在生成，不应显示为永久无笔记。
+- `knowledge_revision == notes_generated_revision` 且 notes 列表存在最新版本：本轮生成完成。
+
+建议每 5-10 秒刷新 learning unit 和 notes，不要在防抖时间刚结束时停止等待。长时间未追平时，通过管理后台 task/events 检查 `generate_study_notes` 的 attempt 和错误；gateway 返回成功但未创建 `study_note.json` 时，worker 会记录错误并自动重试。
+
+笔记是经过后端白名单清洗的 HTML fragment，禁止 script、iframe、事件属性、任意 style 和外部资源。修订请求使用 `{ "html": "<article>...</article>", "title": "...", "edit_summary": "..." }`。手动编辑总是创建递增版本；AI 高亮只更新最新版本关联的 `highlighted_html` artifact，不创建版本。管理后台使用富文本编辑器，Android 应使用受控 HTML 渲染。
+
+知识点答题历史同时记录正确、部分正确和错误。闪卡优先级由后端确定性计算：错误次数与近期错误提高权重，时间会衰减，近期连续答对通过 success pressure 和 streak multiplier 降低旧错题权重。OpenClaw 只生成卡片文本；卡组、卡片、权重和权重因子持久化在 PostgreSQL。
+
+首次升级到 HTML 笔记前先 dry-run，再执行清理和自动重建：
+
+```bash
+docker compose exec api python /opt/notepatch/scripts/reset_study_notes_to_html.py
+docker compose exec api python /opt/notepatch/scripts/reset_study_notes_to_html.py --apply
+```
+
+该脚本永久删除旧 Markdown 笔记、高亮和闪卡输出，但保留原始文档、OCR 与仍存在的有效知识块，并安排 5 分钟后的 HTML 笔记生成。若某学习单元的历史知识块此前已经被清理，脚本不会凭空重建笔记；需要重新处理对应课件/笔记，使 `build_knowledge_base` 先恢复知识块。
 
 后台会为每个用户 OpenClaw runtime 写入内置 skill 说明：
 
@@ -694,11 +734,11 @@ docker compose exec api python /opt/notepatch/scripts/backfill_document_purges.p
 docker compose exec api python /opt/notepatch/scripts/backfill_document_purges.py --apply
 ```
 
-OpenClaw 文档镜像会优先把 `ocr_markdown` 和 `ocr_text` 同步到用户 runtime 的：
+OpenClaw 文档镜像会优先把 `ocr_markdown` 和 `ocr_text` 同步到任务快照的：
 
 ```text
-workspace/notepatch/documents/{document_id}/ocr/ocr.md
-workspace/notepatch/documents/{document_id}/ocr/ocr.txt
+workspace/notepatch/openclaw/tasks/{task_id}/input/documents/{document_id}/ocr/ocr.md
+workspace/notepatch/openclaw/tasks/{task_id}/input/documents/{document_id}/ocr/ocr.txt
 ```
 
 并在 `index.json` 中写入 `ocr_markdown_path` / `ocr_text_path`，方便 OpenClaw 直接读取 OCR 文本。

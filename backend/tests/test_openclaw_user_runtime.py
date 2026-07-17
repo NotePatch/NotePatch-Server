@@ -46,7 +46,7 @@ def test_register_generates_openclaw_user_runtime(client):
         assert not (root / "home" / ".openclaw" / "skills" / skill).exists()
     assert (root / "notepatch-runtime.json").exists()
     assert not (root / "home" / ".openclaw" / "notepatch-runtime.json").exists()
-    assert (root / "workspace" / "notepatch" / "documents").is_dir()
+    assert not (root / "workspace" / "notepatch" / "documents").exists()
     assert (root / "workspace" / "notepatch" / "openclaw" / "tasks").is_dir()
     assert (root / "docker-compose.yml").exists()
     assert (root / ".env").exists()
@@ -299,15 +299,7 @@ def test_openclaw_document_sync_is_limited_to_current_user_workspace(
             task_id="task-sync",
         )
 
-    index_path = (
-        Path(get_settings().openclaw_user_runtime_root)
-        / "users"
-        / alice["user"]["id"]
-        / "workspace"
-        / "notepatch"
-        / "documents"
-        / "index.json"
-    )
+    index_path = Path(context["host_task_input_dir"]) / "documents" / "index.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
     document_ids = {document["id"] for document in index["documents"]}
     assert document_ids == {alice_upload["document"]["id"]}
@@ -319,16 +311,22 @@ def test_openclaw_document_sync_is_limited_to_current_user_workspace(
     assert index["skipped_documents"] == []
     assert index["skipped_artifacts"] == []
     assert (
-        Path(get_settings().openclaw_user_runtime_root)
-        / "users"
-        / alice["user"]["id"]
-        / "workspace"
-        / "notepatch"
+        Path(context["host_task_input_dir"])
         / "documents"
         / alice_upload["document"]["id"]
         / "original"
         / "alice.pdf"
     ).exists()
+    with db_sessionmaker() as db:
+        second_context = OpenClawUserRuntimeService().sync_workspace_documents(
+            db=db,
+            storage=fake_storage,
+            workspace_id=alice_workspace_id,
+            task_id="task-sync-second",
+        )
+    assert second_context["documents_index_path"] != context["documents_index_path"]
+    assert index_path.exists()
+    assert (Path(second_context["host_task_input_dir"]) / "documents" / "index.json").exists()
 
 
 def test_openclaw_document_sync_skips_created_and_bad_object_keys(client, db_sessionmaker, fake_storage):
@@ -470,22 +468,14 @@ def test_openclaw_document_sync_exposes_ocr_text_paths(client, db_sessionmaker, 
         db.get(Document, upload["document"]["id"]).status = "uploaded"
         db.add_all(artifact_rows)
         db.commit()
-        OpenClawUserRuntimeService().sync_workspace_documents(
+        context = OpenClawUserRuntimeService().sync_workspace_documents(
             db=db,
             storage=fake_storage,
             workspace_id=workspace_id,
             task_id="task-ocr-text",
         )
 
-    index_path = (
-        Path(get_settings().openclaw_user_runtime_root)
-        / "users"
-        / user["user"]["id"]
-        / "workspace"
-        / "notepatch"
-        / "documents"
-        / "index.json"
-    )
+    index_path = Path(context["host_task_input_dir"]) / "documents" / "index.json"
     document = json.loads(index_path.read_text(encoding="utf-8"))["documents"][0]
     assert document["ocr_markdown_path"].endswith(f"{upload['document']['id']}/ocr/ocr.md")
     assert document["ocr_text_path"].endswith(f"{upload['document']['id']}/ocr/ocr.txt")

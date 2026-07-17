@@ -137,6 +137,7 @@ def test_admin_queues_and_services_degrade_without_redis(client, monkeypatch):
     services = client.get("/api/v1/admin/services", headers=auth_headers(admin["access_token"]))
 
     assert queues.status_code == 200
+    assert {item["name"] for item in queues.json()["queues"]} == {"default", "ocr", "chat"}
     assert {item["status"] for item in queues.json()["queues"]} == {"degraded"}
     assert services.status_code == 200
     service_statuses = {item["name"]: item["status"] for item in services.json()["services"]}

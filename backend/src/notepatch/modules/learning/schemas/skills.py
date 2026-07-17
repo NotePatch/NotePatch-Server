@@ -38,11 +38,22 @@ class KnowledgeBuildResult(StrictResult):
     chunks: list[KnowledgeChunkResult] = Field(min_length=1)
 
 
+class KnowledgePointReference(StrictResult):
+    id: str | None = None
+    name: str = Field(min_length=1)
+
+
+class ScholarKnowledgePoint(StrictResult):
+    id: str
+    name: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+
+
 class ScholarNotesResult(StrictResult):
     title: str = Field(min_length=1)
-    markdown: str = Field(min_length=1)
+    html: str = Field(min_length=1)
     outline: list[str] = Field(default_factory=list)
-    knowledge_points: list[str] = Field(default_factory=list)
+    knowledge_points: list[ScholarKnowledgePoint] = Field(min_length=1)
     review_suggestions: list[str] = Field(default_factory=list)
     source_document_ids: list[str] = Field(default_factory=list)
 
@@ -53,6 +64,7 @@ class PerQuestionGrade(StrictResult):
     max_score: float = Field(gt=0)
     feedback: str = Field(min_length=1)
     evidence: str | None = None
+    knowledge_points: list[KnowledgePointReference] = Field(min_length=1)
 
 
 class GradingMistake(StrictResult):
@@ -82,7 +94,9 @@ class GradingSkillResult(StrictResult):
 
 class HighlightMapItem(StrictResult):
     mistake_id: str
+    knowledge_point_id: str
     knowledge_point: str
+    highlight_level: Literal["red", "yellow"]
     matched_sections: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
 
@@ -92,14 +106,14 @@ class HighlightMap(StrictResult):
 
 
 class NoteHighlightResult(StrictResult):
-    markdown: str = Field(min_length=1)
+    html: str = Field(min_length=1)
     highlight_map: HighlightMap
 
 
 class FlashcardResult(StrictResult):
+    knowledge_point_id: str
     front: str = Field(min_length=1)
     back: str = Field(min_length=1)
-    knowledge_point: str | None = None
     source_refs: list[str] = Field(default_factory=list)
     difficulty: str | None = None
 

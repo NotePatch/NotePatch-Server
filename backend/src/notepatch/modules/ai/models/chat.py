@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from notepatch.platform.database import Base, utcnow
@@ -53,6 +53,8 @@ class ChatMessage(Base):
     task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    citations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    source_status: Mapped[str] = mapped_column(String(32), default="available", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

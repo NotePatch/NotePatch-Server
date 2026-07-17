@@ -132,6 +132,17 @@ class StorageService:
             ContentType="application/json",
         )
 
+    def get_json_artifact(self, object_key: str, bucket: str | None = None) -> dict:
+        response = self._client.get_object(Bucket=bucket or self.bucket, Key=object_key)
+        payload = json.loads(response["Body"].read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("JSON artifact must contain an object")
+        return payload
+
+    def get_text_artifact(self, object_key: str, bucket: str | None = None) -> str:
+        response = self._client.get_object(Bucket=bucket or self.bucket, Key=object_key)
+        return response["Body"].read().decode("utf-8")
+
     def delete_prefix(self, prefix: str) -> None:
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):

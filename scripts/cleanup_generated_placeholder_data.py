@@ -127,9 +127,9 @@ def main() -> None:
             (storage.bucket, key)
             for note in notes
             for key in (
-                note.markdown_object_key,
+                note.html_object_key,
                 note.json_object_key,
-                note.highlighted_object_key,
+                note.highlighted_html_object_key,
                 note.highlight_map_object_key,
             )
             if key

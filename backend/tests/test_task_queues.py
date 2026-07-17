@@ -60,7 +60,6 @@ def test_non_ocr_tasks_route_to_default_queue(client, db_sessionmaker, monkeypat
 
     task_types = [
         "grade_homework",
-        "openclaw_agent_run",
         "build_knowledge_base",
         "generate_flashcards",
     ]
@@ -73,6 +72,25 @@ def test_non_ocr_tasks_route_to_default_queue(client, db_sessionmaker, monkeypat
         ]
 
     assert fake_redis.lists == {"notepatch:tasks": task_ids}
+
+
+def test_openclaw_chat_task_routes_to_chat_queue(client, db_sessionmaker, monkeypatch):
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("notepatch.modules.tasks.services.task.redis.from_url", lambda *args, **kwargs: fake_redis)
+    user = register_user(client, "queue-chat-route@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+
+    with db_sessionmaker() as db:
+        task = TaskService(db).create_task(
+            workspace_id=workspace_id,
+            task_type="openclaw_agent_run",
+            payload={"prompt": "hello"},
+        )
+        event = db.query(TaskEvent).filter_by(task_id=task.id, event_type="queued").one()
+
+    assert fake_redis.lists == {"notepatch:tasks:chat": [task.id]}
+    assert event.data["queue"] == "chat"
+    assert event.data["redis_key"] == "notepatch:tasks:chat"
 
 
 def test_document_pipeline_routes_to_ocr_queue(client, db_sessionmaker, monkeypatch):
@@ -89,7 +107,7 @@ def test_document_pipeline_routes_to_ocr_queue(client, db_sessionmaker, monkeypa
     assert fake_redis.lists == {"notepatch:tasks:ocr": [task.id]}
 
 
-def test_worker_queue_name_resolution_uses_default_or_ocr_keys():
+def test_worker_queue_name_resolution_uses_configured_keys():
     settings = get_settings()
     old_worker_queues = settings.worker_queues
     settings.worker_queues = "default"
@@ -98,6 +116,8 @@ def test_worker_queue_name_resolution_uses_default_or_ocr_keys():
         assert redis_keys_for_worker_queues(["default"]) == ["notepatch:tasks"]
         assert queue_names_from_args("ocr") == ["ocr"]
         assert redis_keys_for_worker_queues(["ocr"]) == ["notepatch:tasks:ocr"]
+        assert queue_names_from_args("chat") == ["chat"]
+        assert redis_keys_for_worker_queues(["chat"]) == ["notepatch:tasks:chat"]
     finally:
         settings.worker_queues = old_worker_queues
 
@@ -109,6 +129,26 @@ def test_default_worker_queue_does_not_pop_ocr_tasks():
 
     assert fake_redis.brpop(redis_keys_for_worker_queues(["default"]), timeout=0) is None
     assert fake_redis.lists[redis_key_for_queue(settings, "ocr")] == ["ocr-task-id"]
+
+
+def test_default_worker_queue_does_not_pop_chat_tasks():
+    settings = get_settings()
+    fake_redis = FakeRedis()
+    fake_redis.rpush(redis_key_for_queue(settings, "chat"), "chat-task-id")
+
+    assert fake_redis.brpop(redis_keys_for_worker_queues(["default"]), timeout=0) is None
+    assert fake_redis.lists[redis_key_for_queue(settings, "chat")] == ["chat-task-id"]
+
+
+def test_chat_worker_queue_can_pop_openclaw_task():
+    settings = get_settings()
+    fake_redis = FakeRedis()
+    fake_redis.rpush(redis_key_for_queue(settings, "chat"), "chat-task-id")
+
+    assert fake_redis.brpop(redis_keys_for_worker_queues(["chat"]), timeout=0) == (
+        "notepatch:tasks:chat",
+        "chat-task-id",
+    )
 
 
 def test_ocr_worker_queue_can_pop_and_process_ocr_document(client, db_sessionmaker, fake_storage):

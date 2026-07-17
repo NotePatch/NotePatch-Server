@@ -29,7 +29,8 @@ a:hover {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -273,7 +274,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   min-width: 180px;
   height: 38px;
   border: 1px solid #cbd4cf;
@@ -281,6 +283,13 @@ select {
   background: #ffffff;
   color: #18201f;
   padding: 0 10px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 140px;
+  padding: 10px;
+  resize: vertical;
 }
 
 .primary-button,
@@ -321,6 +330,195 @@ select {
 .icon-button {
   min-width: 88px;
 }
+
+.button-row,
+.inline-form,
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.danger-button {
+  border-color: #d6a99e;
+  color: #9b3d2a;
+}
+
+.form-panel,
+.note-editor {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.form-panel h2 {
+  padding: 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-label input {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+}
+
+.note-editor textarea {
+  min-height: 420px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.form-actions {
+  justify-content: space-between;
+  color: #68746f;
+}
+
+.segmented {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid #cbd4cf;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented button {
+  min-height: 34px;
+  border: 0;
+  border-right: 1px solid #cbd4cf;
+  background: #fff;
+  padding: 0 14px;
+}
+
+.segmented button:last-child { border-right: 0; }
+.segmented button.active { background: #245f68; color: #fff; }
+.page-tabs { margin-bottom: -8px; }
+
+.html-note-preview {
+  min-height: 420px;
+  overflow: auto;
+  border: 1px solid #d9dfd8;
+  border-radius: 6px;
+  padding: 18px;
+}
+
+.rich-note-editor {
+  overflow: hidden;
+  border: 1px solid #cbd4cf;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.rich-note-toolbar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid #d9dfd8;
+  background: #f5f7f6;
+  padding: 4px 8px;
+}
+
+.rich-note-toolbar button {
+  display: inline-grid;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+}
+
+.rich-note-toolbar button.active {
+  background: #245f68;
+  color: #fff;
+}
+
+.note-editor-content {
+  min-height: 420px;
+  outline: none;
+  padding: 24px 32px;
+}
+
+.np-note-theme {
+  color: #17201d;
+  background-color: #fff;
+  background-image: linear-gradient(#e7edf0 1px, transparent 1px);
+  background-size: 100% 28px;
+  line-height: 1.75;
+}
+
+.np-note-theme h1,
+.np-note-theme h2,
+.np-note-theme h3 {
+  color: #194f57;
+  letter-spacing: 0;
+}
+
+.np-note-theme .np-note-section,
+.np-note-theme section {
+  margin: 16px 0;
+  padding: 8px 14px;
+  border-left: 3px solid #4f8b82;
+  background: rgb(255 255 255 / 92%);
+}
+
+.np-note-theme .np-callout {
+  border: 1px solid #7ba59e;
+  background: #eef7f4;
+  padding: 10px 14px;
+}
+
+.np-note-theme .np-highlight--yellow {
+  background: #fff09a;
+}
+
+.np-note-theme .np-highlight--red {
+  background: #ffd5d0;
+  box-shadow: inset 4px 0 #d84a3a;
+}
+
+.np-note-theme table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+.np-note-theme th,
+.np-note-theme td {
+  border: 1px solid #aebbb7;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.empty-state {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  align-content: center;
+  color: #68746f;
+}
+
+.split-view {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+  gap: 16px;
+}
+
+.selected-row { background: #eef5f3; }
+.conversation-panel { min-height: 480px; }
+.message-list { display: grid; gap: 10px; padding: 12px 16px 16px; }
+.message { border-left: 3px solid #8ca9a5; padding: 8px 12px; }
+.message-assistant { border-color: #245f68; }
+.message > div { display: flex; align-items: center; gap: 8px; }
+.message > div span:last-child { margin-left: auto; color: #68746f; font-size: 12px; }
+.message p { white-space: pre-wrap; line-height: 1.5; }
 
 .status {
   display: inline-flex;
@@ -523,8 +721,16 @@ select {
 }
 
 @media (max-width: 980px) {
+  html,
+  body,
+  #root {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
   .shell {
     grid-template-columns: 1fr;
+    min-width: 0;
   }
 
   .sidebar {
@@ -532,6 +738,8 @@ select {
     top: 0;
     z-index: 10;
     padding: 10px;
+    max-width: 100vw;
+    overflow: hidden;
   }
 
   .brand {
@@ -539,7 +747,14 @@ select {
   }
 
   .nav {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    display: flex;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .nav a {
+    flex: 0 0 40px;
+    padding: 0 10px;
   }
 
   .nav a {
@@ -557,6 +772,18 @@ select {
 
   .content {
     padding: 16px;
+  }
+
+  .main,
+  .content,
+  .page,
+  .panel {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .split-view {
+    grid-template-columns: 1fr;
   }
 
   .page-header {

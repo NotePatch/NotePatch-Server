@@ -91,6 +91,16 @@ class FakeStorage:
             "body": payload,
         }
 
+    def get_json_artifact(self, object_key: str, bucket: str | None = None) -> dict:
+        payload = self.objects[(bucket or self.bucket, object_key)]["body"]
+        if not isinstance(payload, dict):
+            raise ValueError("JSON artifact must contain an object")
+        return dict(payload)
+
+    def get_text_artifact(self, object_key: str, bucket: str | None = None) -> str:
+        payload = self.objects[(bucket or self.bucket, object_key)]["body"]
+        return payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
+
     def delete_prefix(self, prefix: str) -> None:
         for key in list(self.objects):
             if key[1].startswith(prefix):

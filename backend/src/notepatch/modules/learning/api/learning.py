@@ -8,16 +8,30 @@ from notepatch.entrypoints.deps import get_storage_service, get_workspace_member
 from notepatch.platform.database import get_db
 from notepatch.modules.documents.models.document import Document
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
-from notepatch.modules.learning.models.learning import LearningUnit, LearningUnitDocument, StudyNoteVersion
+from notepatch.modules.learning.models.learning import (
+    Flashcard,
+    FlashcardDeck,
+    LearningUnit,
+    LearningUnitDocument,
+    StudyNoteVersion,
+)
 from notepatch.modules.identity.models.workspace import WorkspaceMember
 from notepatch.modules.learning.schemas.learning import (
     KnowledgeChunkRead,
+    FlashcardDeckDetail,
+    FlashcardDeckRead,
+    FlashcardRead,
     LearningUnitDetailResponse,
     LearningUnitDocumentRead,
     LearningUnitRead,
     StudyNoteDownloadUrlResponse,
     StudyNoteVersionRead,
+    StudyNoteRevisionCreate,
+    StudyNoteRevisionResponse,
 )
+from notepatch.modules.identity.models.user import User
+from notepatch.entrypoints.deps import get_current_user
+from notepatch.modules.learning.services.notes import StudyNoteService
 from notepatch.platform.storage import StorageService
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/learning-units", tags=["learning"])
@@ -62,9 +76,9 @@ def _documents_for_unit(db: Session, workspace_id: str, learning_unit_id: str) -
 
 def _note_download_urls(storage: StorageService, note: StudyNoteVersion, expires_seconds: int) -> dict[str, str]:
     keys = {
-        "markdown": note.markdown_object_key,
+        "html": note.html_object_key,
         "json": note.json_object_key,
-        "highlighted": note.highlighted_object_key,
+        "highlighted_html": note.highlighted_html_object_key,
         "highlight_map": note.highlight_map_object_key,
     }
     return {
@@ -170,7 +184,7 @@ def get_study_note_download_url(
     workspace_id: str,
     learning_unit_id: str,
     note_version_id: str,
-    kind: Literal["markdown", "json", "highlighted", "highlight_map"] = Query(default="markdown"),
+    kind: Literal["html", "json", "highlighted_html", "highlight_map"] = Query(default="html"),
     expires_seconds: int = Query(default=900, ge=60, le=86400),
     _member: WorkspaceMember = Depends(get_workspace_member),
     db: Session = Depends(get_db),
@@ -187,9 +201,9 @@ def get_study_note_download_url(
     if note is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Study note not found")
     object_key_by_kind = {
-        "markdown": note.markdown_object_key,
+        "html": note.html_object_key,
         "json": note.json_object_key,
-        "highlighted": note.highlighted_object_key,
+        "highlighted_html": note.highlighted_html_object_key,
         "highlight_map": note.highlight_map_object_key,
     }
     object_key = object_key_by_kind[kind]
@@ -203,3 +217,109 @@ def get_study_note_download_url(
         expires_in=expires_seconds,
         download_url=storage.create_presigned_download_url(storage.bucket, object_key, expires_seconds),
     )
+
+
+@router.post(
+    "/{learning_unit_id}/notes/{base_version_id}/revisions",
+    response_model=StudyNoteRevisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_study_note_revision(
+    workspace_id: str,
+    learning_unit_id: str,
+    base_version_id: str,
+    payload: StudyNoteRevisionCreate,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: StorageService = Depends(get_storage_service),
+) -> StudyNoteRevisionResponse:
+    note, downstream = StudyNoteService(db, storage).create_revision(
+        workspace_id=workspace_id,
+        learning_unit_id=learning_unit_id,
+        base_version_id=base_version_id,
+        actor=current_user,
+        html=payload.html,
+        title=payload.title,
+        edit_summary=payload.edit_summary,
+    )
+    return StudyNoteRevisionResponse(
+        note=StudyNoteVersionRead.model_validate(note),
+        downstream_tasks=[{"id": task.id, "task_type": task.task_type, "status": task.status} for task in downstream],
+    )
+
+
+def _deck_detail(db: Session, deck: FlashcardDeck) -> FlashcardDeckDetail:
+    cards = db.scalars(
+        select(Flashcard)
+        .where(Flashcard.workspace_id == deck.workspace_id, Flashcard.deck_id == deck.id)
+        .order_by(Flashcard.rank.asc())
+    ).all()
+    return FlashcardDeckDetail(
+        deck=FlashcardDeckRead.model_validate(deck),
+        cards=[FlashcardRead.model_validate(card) for card in cards],
+    )
+
+
+@router.get("/{learning_unit_id}/flashcard-decks", response_model=list[FlashcardDeckRead])
+def list_flashcard_decks(
+    workspace_id: str,
+    learning_unit_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+) -> list[FlashcardDeck]:
+    _get_learning_unit(db, workspace_id, learning_unit_id)
+    return db.scalars(
+        select(FlashcardDeck)
+        .where(
+            FlashcardDeck.workspace_id == workspace_id,
+            FlashcardDeck.learning_unit_id == learning_unit_id,
+        )
+        .order_by(FlashcardDeck.version_no.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
+
+@router.get("/{learning_unit_id}/flashcard-decks/latest", response_model=FlashcardDeckDetail)
+def get_latest_flashcard_deck(
+    workspace_id: str,
+    learning_unit_id: str,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+) -> FlashcardDeckDetail:
+    _get_learning_unit(db, workspace_id, learning_unit_id)
+    deck = db.scalar(
+        select(FlashcardDeck)
+        .where(
+            FlashcardDeck.workspace_id == workspace_id,
+            FlashcardDeck.learning_unit_id == learning_unit_id,
+        )
+        .order_by(FlashcardDeck.version_no.desc())
+    )
+    if deck is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flashcard deck not found")
+    return _deck_detail(db, deck)
+
+
+@router.get("/{learning_unit_id}/flashcard-decks/{deck_id}", response_model=FlashcardDeckDetail)
+def get_flashcard_deck(
+    workspace_id: str,
+    learning_unit_id: str,
+    deck_id: str,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+) -> FlashcardDeckDetail:
+    _get_learning_unit(db, workspace_id, learning_unit_id)
+    deck = db.scalar(
+        select(FlashcardDeck).where(
+            FlashcardDeck.workspace_id == workspace_id,
+            FlashcardDeck.learning_unit_id == learning_unit_id,
+            FlashcardDeck.id == deck_id,
+        )
+    )
+    if deck is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flashcard deck not found")
+    return _deck_detail(db, deck)

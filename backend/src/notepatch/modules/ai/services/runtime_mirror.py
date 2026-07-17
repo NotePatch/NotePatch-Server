@@ -27,7 +27,7 @@ class OpenClawRuntimeMirror:
     ) -> dict:
         runtime = self.runtime_for_workspace(db, workspace_id)
         user_id = runtime["user_id"]
-        documents_root = self.documents_root(user_id)
+        documents_root = self.task_documents_root(user_id, task_id)
         if documents_root.exists():
             shutil.rmtree(documents_root)
         documents_root.mkdir(parents=True, exist_ok=True)
@@ -140,13 +140,14 @@ class OpenClawRuntimeMirror:
         task_output_dir = self.task_output_dir(user_id, task_id)
         task_input_dir.mkdir(parents=True, exist_ok=True)
         task_output_dir.mkdir(parents=True, exist_ok=True)
+        container_documents_root = self._container_workspace_path(user_id, documents_root)
         index_path = documents_root / "index.json"
         index_path.write_text(
             json.dumps(
                 {
                     "workspace_id": workspace_id,
                     "generated_at": self._iso(utcnow()),
-                    "documents_root": "/workspace/notepatch/documents",
+                    "documents_root": container_documents_root,
                     "task_output_dir": f"/workspace/notepatch/openclaw/tasks/{task_id}/output",
                     "documents": index_documents,
                     "skipped_documents": skipped_documents,
@@ -160,12 +161,13 @@ class OpenClawRuntimeMirror:
         self._ensure_runtime_permissions(user_id, roots=(self.workspace_dir(user_id),))
         return {
             **runtime,
-            "documents_index_path": "/workspace/notepatch/documents/index.json",
-            "documents_root_path": "/workspace/notepatch/documents",
+            "documents_index_path": f"{container_documents_root}/index.json",
+            "documents_root_path": container_documents_root,
             "task_output_path": f"/workspace/notepatch/openclaw/tasks/{task_id}/output",
             "host_task_output_dir": str(task_output_dir),
             "host_task_input_dir": str(task_input_dir),
             "documents_synced": len(index_documents),
+            "mirrored_document_ids": [item["id"] for item in index_documents],
             "files_synced": file_count,
             "documents_skipped": len(skipped_documents),
             "artifacts_skipped": len(skipped_artifacts),

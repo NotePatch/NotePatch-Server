@@ -15,6 +15,136 @@ export type AdminUser = {
   username?: string | null;
   phone?: string | null;
   is_active: boolean;
+  must_change_password: boolean;
+  ai_history_enabled: boolean;
+  created_at: string;
+};
+
+export type LearningUnit = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  subject?: string | null;
+  grade_level?: string | null;
+  topic?: string | null;
+  knowledge_revision: number;
+  attempt_revision: number;
+  notes_generated_revision: number;
+  note_generation_due_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StudyNote = {
+  id: string;
+  workspace_id: string;
+  learning_unit_id: string;
+  version_no: number;
+  title: string;
+  html_object_key: string;
+  json_object_key: string;
+  highlighted_html_object_key?: string | null;
+  knowledge_point_ids: string[];
+  source_version_id?: string | null;
+  edit_origin?: string | null;
+  edit_summary?: string | null;
+  created_at: string;
+};
+
+export type FlashcardDeck = {
+  id: string;
+  workspace_id: string;
+  learning_unit_id: string;
+  study_note_version_id: string;
+  version_no: number;
+  attempt_revision: number;
+  weighting_config: Record<string, number>;
+  created_at: string;
+};
+
+export type Flashcard = {
+  id: string;
+  knowledge_point_id: string;
+  front: string;
+  back: string;
+  priority_score: number;
+  priority_factors: Record<string, number>;
+  rank: number;
+};
+
+export type FlashcardDeckDetail = { deck: FlashcardDeck; cards: Flashcard[] };
+
+export type KnowledgeChunk = {
+  id: string;
+  workspace_id: string;
+  document_id?: string | null;
+  subject?: string | null;
+  source_type?: string | null;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type Homework = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  description?: string | null;
+  document_id?: string | null;
+  status: string;
+  rubric_text?: string | null;
+  max_score: number;
+  created_at: string;
+};
+
+export type Mistake = {
+  id: string;
+  workspace_id: string;
+  knowledge_point?: string | null;
+  description: string;
+  status: string;
+  created_at: string;
+};
+
+export type Conversation = {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  title: string;
+  last_message_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatMessage = {
+  id: string;
+  role: string;
+  content: string;
+  status: string;
+  error_message?: string | null;
+  created_at: string;
+};
+
+export type AdminOperation = {
+  id: string;
+  operation_type: string;
+  target_type: string;
+  target_id: string;
+  status: string;
+  phase?: string | null;
+  task_id?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdminAuditLog = {
+  id: string;
+  actor_email: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  workspace_id?: string | null;
   created_at: string;
 };
 
@@ -147,6 +277,10 @@ export type AdminOverview = {
   queued_tasks_count: number;
   running_tasks_count: number;
   ocr_artifacts_count: number;
+  learning_units_count: number;
+  study_notes_count: number;
+  homeworks_count: number;
+  open_mistakes_count: number;
   queue_lengths: AdminQueueStatus[];
 };
 
@@ -189,21 +323,38 @@ async function parseJson<T>(response: Response): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-async function refreshAccessToken(): Promise<boolean> {
+let refreshPromise: Promise<boolean> | null = null;
+
+async function performRefreshAccessToken(): Promise<boolean> {
   const tokens = getTokens();
   if (!tokens?.refresh_token) return false;
-  const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: tokens.refresh_token })
-  });
+  const attemptedRefreshToken = tokens.refresh_token;
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: attemptedRefreshToken })
+    });
+  } catch {
+    return false;
+  }
   if (!response.ok) {
-    clearTokens();
+    if (getTokens()?.refresh_token === attemptedRefreshToken) clearTokens();
     return false;
   }
   const payload = await parseJson<TokenBundle>(response);
   setTokens(payload);
   return true;
+}
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = performRefreshAccessToken().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {

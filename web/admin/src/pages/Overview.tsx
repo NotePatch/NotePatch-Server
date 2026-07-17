@@ -35,6 +35,10 @@ export function OverviewPage() {
         <Metric label="任务" value={data?.tasks_count} to="/tasks" />
         <Metric label="失败任务" value={data?.failed_tasks_count} to="/tasks?status=failed" tone="danger" />
         <Metric label="OCR Artifacts" value={data?.ocr_artifacts_count} to="/documents" />
+        <Metric label="学习单元" value={data?.learning_units_count} to="/learning" />
+        <Metric label="笔记版本" value={data?.study_notes_count} to="/learning" />
+        <Metric label="作业" value={data?.homeworks_count} to="/homeworks" />
+        <Metric label="待复习错题" value={data?.open_mistakes_count} to="/mistakes" tone="danger" />
       </div>
 
       <section className="panel">

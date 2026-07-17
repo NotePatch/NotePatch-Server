@@ -48,7 +48,7 @@ Backend internal
 
 ## Web Admin Frontend
 
-仓库内置运维管理后台在 `web/admin/`，是独立 Vite React 应用。它面向运维管理员，不是普通用户 Web 端；移动端和用户端不应调用 `/admin/*`。
+仓库内置运营管理后台在 `web/admin/`，是独立 Vite React 应用。它覆盖用户、文档、任务、学习笔记、作业、错题、会话、异步操作和审计；移动端和用户端不应调用 `/admin/*`。
 
 启动：
 
@@ -65,7 +65,7 @@ http://localhost:5173
 
 管理后台使用 `${VITE_API_BASE_URL}/auth/login`，然后调用 `${VITE_API_BASE_URL}/admin/me` 校验登录邮箱是否在后端 `.env` 的 `ADMIN_EMAILS` 白名单中。`ADMIN_EMAILS` 为空时，后台 API 默认禁用并返回 403。
 
-后台接口只读优先：
+后台使用专用管理员接口，主要能力包括：
 
 ```http
 GET /admin/overview
@@ -79,11 +79,22 @@ GET /admin/artifacts/{artifact_id}/download-url
 GET /admin/tasks
 GET /admin/tasks/{task_id}
 GET /admin/tasks/{task_id}/events
+POST /admin/tasks/{task_id}/cancel
+POST /admin/tasks/{task_id}/retry
+POST /admin/documents/{document_id}/process
+DELETE /admin/documents/{document_id}
+GET /admin/learning-units
+POST /admin/learning-units/{learning_unit_id}/notes/{base_version_id}/revisions
+GET /admin/homeworks
+GET /admin/mistakes
+GET /admin/conversations
+GET /admin/operations
+GET /admin/audit-logs
 GET /admin/queues
 GET /admin/services
 ```
 
-后台可跨 personal workspace 做排障查询，但不会改变用户端 workspace 隔离规则。第一版不提供删除用户、删除文件、重跑 OCR 或任务重试等破坏性操作。
+后台可跨 personal workspace 管理数据，但不会改变用户端 workspace 隔离规则。所有写操作记录审计；文档和用户删除为可轮询的异步清理，危险操作需要前端明确确认。管理员不能冒充用户发送聊天，也不能代用户上传文件。
 
 ## Recommended App Flow
 
@@ -110,6 +121,31 @@ const tokenState = {
   accessToken: localStorage.getItem("access_token"),
   refreshToken: localStorage.getItem("refresh_token"),
 };
+let refreshPromise: Promise<boolean> | null = null;
+
+function refreshOnce(): Promise<boolean> {
+  if (!refreshPromise) {
+    const attempted = tokenState.refreshToken;
+    refreshPromise = fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: attempted }),
+    }).then(async (response) => {
+      if (!response.ok) {
+        // A stale concurrent response must not clear a newer token pair.
+        if (tokenState.refreshToken === attempted) tokenState.refreshToken = null;
+        return false;
+      }
+      const data = await response.json();
+      tokenState.accessToken = data.access_token;
+      tokenState.refreshToken = data.refresh_token;
+      localStorage.setItem("access_token", data.access_token);
+      localStorage.setItem("refresh_token", data.refresh_token);
+      return true;
+    }).finally(() => { refreshPromise = null; });
+  }
+  return refreshPromise;
+}
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -119,18 +155,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   let res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
 
   if (res.status === 401 && tokenState.refreshToken) {
-    const refreshed = await fetch(`${API_BASE_URL}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: tokenState.refreshToken }),
-    });
-    if (refreshed.ok) {
-      const data = await refreshed.json();
-      tokenState.accessToken = data.access_token;
-      tokenState.refreshToken = data.refresh_token;
-      localStorage.setItem("access_token", data.access_token);
-      localStorage.setItem("refresh_token", data.refresh_token);
-      headers.set("Authorization", `Bearer ${data.access_token}`);
+    if (await refreshOnce()) {
+      headers.set("Authorization", `Bearer ${tokenState.accessToken}`);
       res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
     }
   }
@@ -142,6 +168,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return res.json();
 }
 ```
+
+Web、Android 和多标签页客户端都必须把 refresh 做成 single-flight。后端允许同一枚因轮换失效的 token 在短暂宽限期内处理并发请求，但 logout、修改密码和管理员禁用产生的撤销没有宽限。
 
 ## Auth APIs
 
@@ -515,6 +543,8 @@ type ChatMessage = {
   task_id: string | null;
   status: "queued" | "running" | "succeeded" | "failed";
   error_message: string | null;
+  citations: Array<{ chunk_id?: string; document_id?: string; score?: number; metadata?: object }>;
+  source_status: "available" | "partially_unavailable" | "unavailable";
   created_at: string;
 };
 
@@ -552,6 +582,8 @@ PATCH  /auth/preferences
 
 `GET /auth/me`、登录和 refresh 响应都会给出 `user.ai_history_enabled`。前端用 `PATCH /auth/preferences` 传 `{ "ai_history_enabled": false }` 关闭全局上下文注入；关闭后历史仍保留并可查看，但后续 OpenClaw 调用只发送当前 prompt。重新开启后，后端会自动传入该会话最近 `AI_CHAT_HISTORY_MESSAGE_LIMIT`（默认 20）条成功消息。删除会话是软删除，删除后不可继续发送或读取，关联的 queued/running OpenClaw task 会被协作取消。
 
+删除被引用的资料不会删除已经完成的问答正文。后端会从 message 中移除失效 citation，并把 `source_status` 改为 `partially_unavailable` 或 `unavailable`；前端应保留正文并显示“部分/全部来源资料已删除”的非阻断提示。
+
 任务成功后再拉取 artifacts：
 
 ```ts
@@ -587,8 +619,12 @@ complete-upload
   -> document_processing_pipeline
   -> OCR artifacts
   -> build_knowledge_base
+  -> debounce after last knowledge update (300s by default)
   -> generate_study_notes
+  -> generate_flashcards
 ```
+
+`build_knowledge_base` 与笔记生成是两个独立生命周期。300 秒仅表示最后一次知识更新后的最早启动时间，不表示笔记会在 300 秒内完成。OpenClaw skill 执行、schema 校验、HTML 清洗、SeaweedFS 写入以及最多 3 次任务重试都会继续占用时间。
 
 上传作业后，如果 metadata 带 `learning_unit_id`，后端会把作业挂到已有学习单元；否则会自动创建/归类学习单元：
 
@@ -610,6 +646,10 @@ type LearningUnit = {
   subject: string | null;
   grade_level: string | null;
   topic: string | null;
+  knowledge_revision: number;
+  attempt_revision: number;
+  notes_generated_revision: number;
+  note_generation_due_at: string | null;
 };
 
 type StudyNoteVersion = {
@@ -617,10 +657,14 @@ type StudyNoteVersion = {
   learning_unit_id: string;
   version_no: number;
   title: string;
-  markdown_object_key: string;
+  html_object_key: string;
   json_object_key: string;
-  highlighted_object_key: string | null;
+  highlighted_html_object_key: string | null;
   highlight_map_object_key: string | null;
+  knowledge_point_ids: string[];
+  source_version_id: string | null;
+  edit_origin: "skill" | "user" | "admin" | null;
+  edit_summary: string | null;
   download_urls?: Record<string, string>;
 };
 
@@ -633,6 +677,19 @@ async function listStudyNotes(workspaceId: string, learningUnitId: string) {
     `/workspaces/${workspaceId}/learning-units/${learningUnitId}/notes?include_download_url=true`,
   );
 }
+
+async function reviseStudyNote(workspaceId: string, learningUnitId: string, latestVersionId: string, html: string) {
+  return apiFetch(
+    `/workspaces/${workspaceId}/learning-units/${learningUnitId}/notes/${latestVersionId}/revisions`,
+    { method: "POST", body: JSON.stringify({ html, edit_summary: "Manual edit" }) },
+  );
+}
+
+function noteGenerationState(unit: LearningUnit, notes: StudyNoteVersion[]) {
+  if (unit.knowledge_revision === 0) return "no_knowledge";
+  if (unit.notes_generated_revision < unit.knowledge_revision) return "generating";
+  return notes.length > 0 ? "ready" : "unavailable";
+}
 ```
 
 可用接口：
@@ -642,17 +699,30 @@ GET /workspaces/{workspace_id}/learning-units
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}?include_download_url=true
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/knowledge-chunks
 GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes?include_download_url=true
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=highlighted
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=highlighted_html
+POST /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{latest_note_version_id}/revisions
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/latest
+GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/{deck_id}
 ```
 
 UI 建议：
 
-- 文档处理 task 成功后，刷新 learning units 和 notes。
+- 文档处理 task 成功只代表 OCR 主流程结束；课件/笔记还要继续完成知识库和防抖笔记任务。
+- 当 `notes_generated_revision < knowledge_revision` 时显示“正在整理笔记”，每 5-10 秒刷新 learning unit 和 notes；不要在等待 5 分钟后直接判定失败。
+- 当 revisions 相等且 notes 列表非空时展示 `version_no` 最大的版本。若 `knowledge_revision === 0`，表示尚无可用于笔记的知识库内容。
+- notes API 返回 metadata 和短期签名 URL，不内联返回 HTML。使用 `download_urls.highlighted_html`，不存在时回退到 `download_urls.html`。
 - `grade_homework` 成功后，刷新 mistakes、knowledge chunks 和 latest note。
-- 如果 latest note 有 `highlighted` 下载 URL，优先展示高亮版；否则展示普通 markdown。
+- 如果 latest note 有 `highlighted_html` 下载 URL，优先展示高亮 HTML；否则展示普通 HTML。
+- 修订接口只接受当前最新版本 ID；并发编辑过期时返回 `409`，前端应刷新后让用户重新确认。
+- HTML 必须按不可信内容处理；推荐受控富文本组件或 sandboxed WebView，不执行 script、事件属性或外部资源。
+- 手动编辑创建新版本；错题高亮只更新最新版本的 highlighted HTML artifact。没有笔记时评分不会创建高亮任务。
+- `flashcard-decks/latest` 中每张卡包含 `priority_score` 和 `priority_factors`，可向用户解释错误频率、时间衰减和连续答对降权。
 - 前端不要直接调用 OpenClaw skill；当前 skill 执行和后续替换都由后端 worker 管理。
 
-后端内部区分 `default` 和 `ocr` 两个 worker queue：`process` 创建的 `document_processing_pipeline` 与独立 `ocr_document` 都进入 `ocr` queue，其他 AI/学习任务进入 `default` queue。这个拆分不改变前端 API；前端仍只调用 `process`、轮询 task/events、读取 `/ocr` 和 artifact download-url。真实 PaddleOCR worker 由部署侧通过 `docker compose --profile ocr up -d --build ocr-worker` 启动，前端不需要也不能选择 worker。
+若笔记长时间未生成，用户端保留“仍在生成/暂不可用”状态；运维端应查看 `generate_study_notes` 的 task events。常见可恢复情况是 gateway 已返回 HTTP 200，但 skill 没有写出必需的 `study_note.json`，worker 会自动重试，最终成功前不要缓存空 notes 列表为永久结果。
+
+后端内部区分 `default`、`ocr` 和 `chat` 三个 worker queue：文档处理进入 `ocr`，学习任务进入 `default`，交互式 OpenClaw 对话进入 `chat`，避免聊天被长任务阻塞。这个拆分不改变前端 API。
 
 `POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口。它创建后端异步 OpenClaw 任务，前端不直接调用 OpenClaw Gateway，也不要启动/停止容器。请求体使用 `{ "prompt": string, "conversation_id"?: string, "input": object, "options": object }`，响应是 `TaskRead`；随后轮询 task 与 events 获取 `task.result.answer` 或失败原因。会话历史由后端保存，是否注入 OpenClaw 由用户全局 `ai_history_enabled` 控制。后端会为每个用户维护独立 OpenClaw gateway 配置和用户数据目录；用户在线时 supervisor 保持 gateway 运行，worker 在任务前把该用户 personal workspace 的文档镜像到 OpenClaw workspace，再把 OpenClaw 输出上传回 SeaweedFS。
 

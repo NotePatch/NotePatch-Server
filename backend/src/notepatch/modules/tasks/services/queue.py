@@ -15,6 +15,8 @@ def parse_queue_names(value: str | None, *, default: str) -> list[str]:
 def queue_name_for_task_type(settings: Settings, task_type: str) -> str:
     if task_type in {"ocr_document", "document_processing_pipeline"}:
         return settings.ocr_queue_name
+    if task_type == "openclaw_agent_run":
+        return settings.chat_queue_name
     return settings.default_queue_name
 
 

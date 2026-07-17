@@ -78,6 +78,7 @@ class MistakeRead(ORMModel):
     id: str
     workspace_id: str
     question_id: str | None = None
+    knowledge_point_id: str | None = None
     grading_result_id: str | None = None
     student_user_id: str | None = None
     subject: str | None = None
