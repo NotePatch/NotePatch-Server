@@ -257,6 +257,7 @@ def client(
     old_gpu_lock_enabled = settings.gpu_lock_enabled
     old_admin_emails = settings.admin_emails
     old_auto_learning_pipeline = settings.auto_learning_pipeline
+    old_clamav_enabled = settings.clamav_enabled
     settings.tusd_data_dir = str(tmp_path)
     settings.openclaw_user_runtime_root = str(tmp_path / "openclaw-users")
     settings.openai_api_key = None
@@ -266,6 +267,7 @@ def client(
     settings.gpu_lock_enabled = False
     settings.admin_emails = ""
     settings.auto_learning_pipeline = False
+    settings.clamav_enabled = False
     from tests.fakes import FakeEmbeddingClient, FakeSkillRunner, fake_ocr_pipeline
 
     monkeypatch.setattr("notepatch.modules.tasks.services.executor.OcrPipeline", fake_ocr_pipeline)
@@ -302,6 +304,7 @@ def client(
     settings.gpu_lock_enabled = old_gpu_lock_enabled
     settings.admin_emails = old_admin_emails
     settings.auto_learning_pipeline = old_auto_learning_pipeline
+    settings.clamav_enabled = old_clamav_enabled
 
 
 def auth_headers(access_token: str) -> dict[str, str]:

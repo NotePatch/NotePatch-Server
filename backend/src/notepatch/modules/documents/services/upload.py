@@ -145,6 +145,22 @@ class UploadService:
         if upload_session.status == "cancelled" or document.status == "deleted":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload was cancelled")
 
+        task_service = TaskService(self.db)
+        if upload_session.status == "completed":
+            if self.settings.clamav_enabled:
+                if document.scan_status in {"clean", "infected", "failed"}:
+                    return document
+                existing_scan = task_service.find_active_task(
+                    workspace_id=document.workspace_id,
+                    task_type="scan_document",
+                    resource_type="document",
+                    resource_id=document.id,
+                )
+                if existing_scan is not None:
+                    return document
+            elif document.status in {"uploaded", "processing", "ready"}:
+                return document
+
         if tus_upload_id:
             upload_session.tus_upload_id = tus_upload_id
             document.upload_id = tus_upload_id
@@ -215,17 +231,34 @@ class UploadService:
                     metadata_={"source": "tusd"},
                 )
             )
-        self.db.commit()
-        self.db.refresh(document)
+        scan_task = None
+        scan_queue = None
         if self.settings.clamav_enabled:
-            TaskService(self.db).create_task(
+            scan_task = task_service.find_active_task(
                 workspace_id=document.workspace_id,
                 task_type="scan_document",
                 resource_type="document",
                 resource_id=document.id,
-                payload={"document_id": document.id},
             )
-        elif self.settings.auto_learning_pipeline:
+            if scan_task is None:
+                scan_task, scan_queue = task_service.create_task_record(
+                    workspace_id=document.workspace_id,
+                    task_type="scan_document",
+                    resource_type="document",
+                    resource_id=document.id,
+                    payload={"document_id": document.id},
+                )
+
+        self.db.commit()
+        self.db.refresh(document)
+        if scan_task is not None and scan_queue is not None:
+            self.db.refresh(scan_task)
+            if not task_service.enqueue_task(scan_task.id, queue_name=scan_queue):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Task queue is unavailable",
+                )
+        elif not self.settings.clamav_enabled and self.settings.auto_learning_pipeline:
             LearningWorkflowService(self.db, self.storage).schedule_after_upload(document)
         return document
 
