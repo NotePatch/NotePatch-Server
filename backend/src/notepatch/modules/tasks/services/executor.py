@@ -13,6 +13,7 @@ from notepatch.modules.documents.services.doctr import DocTrClient, get_doctr_cl
 from notepatch.modules.documents.services.task_support import _task_document
 from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
+from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.registry import TaskExecutionContext, execute_registered_task
 from notepatch.modules.tasks.services.task import TaskService
@@ -79,7 +80,10 @@ def process_task(
             TaskService(db).mark_cancelled(task, str(exc))
     except Exception as exc:
         _handle_task_failure(db, task_id, learning, storage, exc)
-    return db.get(Task, task_id)
+    completed_task = db.get(Task, task_id)
+    if completed_task is not None:
+        reconcile_learning_unit_merge(db, completed_task)
+    return completed_task
 
 
 def _handle_task_failure(

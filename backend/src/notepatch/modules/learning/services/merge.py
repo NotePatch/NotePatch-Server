@@ -232,3 +232,83 @@ class LearningUnitMergeService:
                     attempt.knowledge_point_id = duplicate.id
                     attempt.learning_unit_id = target_id
             self.db.delete(point)
+
+
+def reconcile_learning_unit_merge(db: Session, completed_task: Task) -> None:
+    """Close a merge only after its last related rebuild task reaches a terminal state."""
+    if completed_task.status in {"queued", "running"}:
+        return
+    unit_ids = _task_learning_unit_ids(db, completed_task)
+    if not unit_ids:
+        return
+    for unit_id in unit_ids:
+        unit = db.scalar(
+            select(LearningUnit).where(
+                LearningUnit.workspace_id == completed_task.workspace_id,
+                LearningUnit.id == unit_id,
+                LearningUnit.merge_status == "rebuilding",
+            )
+        )
+        if unit is None:
+            continue
+        metadata = dict(unit.metadata_ or {})
+        if completed_task.status in {"failed", "cancelled"}:
+            unit.merge_status = "failed"
+            metadata["merge_failed_task_id"] = completed_task.id
+            metadata["merge_failed_task_type"] = completed_task.task_type
+            unit.metadata_ = metadata
+            continue
+
+        document_ids = set(
+            db.scalars(
+                select(LearningUnitDocument.document_id).where(
+                    LearningUnitDocument.workspace_id == unit.workspace_id,
+                    LearningUnitDocument.learning_unit_id == unit.id,
+                )
+            ).all()
+        )
+        active_tasks = db.scalars(
+            select(Task).where(
+                Task.workspace_id == unit.workspace_id,
+                Task.id != completed_task.id,
+                Task.status.in_(("queued", "running")),
+                Task.cancel_requested_at.is_(None),
+            )
+        ).all()
+        if any(_task_is_related_to_unit(item, unit.id, document_ids) for item in active_tasks):
+            continue
+        unit.merge_status = "completed"
+        metadata["merge_completed_by_task_id"] = completed_task.id
+        metadata["merge_completed_by_task_type"] = completed_task.task_type
+        unit.metadata_ = metadata
+    db.commit()
+
+
+def _task_learning_unit_ids(db: Session, task: Task) -> set[str]:
+    payload = task.payload or {}
+    values = {
+        value
+        for value in (payload.get("learning_unit_id"), payload.get("target_learning_unit_id"))
+        if isinstance(value, str) and value
+    }
+    if task.resource_type == "learning_unit" and task.resource_id:
+        values.add(task.resource_id)
+    if task.resource_type == "document" and task.resource_id:
+        values.update(
+            db.scalars(
+                select(LearningUnitDocument.learning_unit_id).where(
+                    LearningUnitDocument.workspace_id == task.workspace_id,
+                    LearningUnitDocument.document_id == task.resource_id,
+                )
+            ).all()
+        )
+    return values
+
+
+def _task_is_related_to_unit(task: Task, unit_id: str, document_ids: set[str]) -> bool:
+    payload = task.payload or {}
+    if payload.get("learning_unit_id") == unit_id or payload.get("target_learning_unit_id") == unit_id:
+        return True
+    if task.resource_type == "learning_unit" and task.resource_id == unit_id:
+        return True
+    return task.resource_type == "document" and task.resource_id in document_ids

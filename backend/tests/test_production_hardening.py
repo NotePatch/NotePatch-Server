@@ -212,3 +212,67 @@ def test_learning_unit_merge_is_async_and_workspace_scoped(client, db_sessionmak
         json={"source_learning_unit_ids": [source_id]},
     )
     assert cross_workspace.status_code == 404
+
+
+def test_merge_status_closes_after_last_related_task(db_sessionmaker):
+    from notepatch.modules.learning.models.learning import LearningUnitDocument
+    from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
+
+    with db_sessionmaker() as db:
+        workspace_id = _workspace_id(db)
+        unit = LearningUnit(workspace_id=workspace_id, title="Merged", merge_status="rebuilding")
+        db.add(unit)
+        db.flush()
+        current, _ = TaskService(db).create_task_record(
+            workspace_id=workspace_id,
+            task_type="generate_flashcards",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id},
+        )
+        sibling, _ = TaskService(db).create_task_record(
+            workspace_id=workspace_id,
+            task_type="generate_study_notes",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id},
+        )
+        db.commit()
+        current = TaskService(db).claim_task(current.id)
+        assert current is not None
+        TaskService(db).mark_succeeded(current, {"ok": True})
+        reconcile_learning_unit_merge(db, current)
+        db.refresh(unit)
+        assert unit.merge_status == "rebuilding"
+
+        sibling = TaskService(db).claim_task(sibling.id)
+        assert sibling is not None
+        TaskService(db).mark_succeeded(sibling, {"ok": True})
+        reconcile_learning_unit_merge(db, sibling)
+        db.refresh(unit)
+        assert unit.merge_status == "completed"
+
+
+def test_merge_status_fails_with_related_terminal_failure(db_sessionmaker):
+    from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
+
+    with db_sessionmaker() as db:
+        workspace_id = _workspace_id(db)
+        unit = LearningUnit(workspace_id=workspace_id, title="Merged", merge_status="rebuilding")
+        db.add(unit)
+        db.flush()
+        task, _ = TaskService(db).create_task_record(
+            workspace_id=workspace_id,
+            task_type="build_knowledge_base",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id},
+        )
+        db.commit()
+        task = TaskService(db).claim_task(task.id)
+        assert task is not None
+        TaskService(db).mark_failed(task, "upstream failed")
+        reconcile_learning_unit_merge(db, task)
+        db.refresh(unit)
+        assert unit.merge_status == "failed"
+        assert unit.metadata_["merge_failed_task_id"] == task.id
