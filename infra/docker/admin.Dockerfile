@@ -11,4 +11,4 @@ FROM nginx:1.27-alpine
 COPY infra/docker/admin-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /opt/notepatch/web/admin/dist /usr/share/nginx/html
 EXPOSE 80
-HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD wget -q -O /dev/null http://localhost/ || exit 1
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
