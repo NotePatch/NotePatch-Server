@@ -264,12 +264,13 @@ services:
 
   prometheus:
     profiles: ["ops"]
-    image: prom/prometheus:v3.5.0
+    build:
+      context: .
+      dockerfile: infra/docker/prometheus.Dockerfile
+    image: notepatch-prometheus:local
     restart: unless-stopped
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=30d"]
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     depends_on:
       api:
@@ -277,7 +278,10 @@ services:
 
   grafana:
     profiles: ["ops"]
-    image: grafana/grafana:12.1.0
+    build:
+      context: .
+      dockerfile: infra/docker/grafana.Dockerfile
+    image: notepatch-grafana:local
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
@@ -287,8 +291,6 @@ services:
       - "0.0.0.0:${GRAFANA_PORT:-3000}:3000"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 
