@@ -48,7 +48,7 @@ class Question(Base):
     document_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("documents.id"), nullable=True)
     homework_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("homeworks.id"), nullable=True)
     sequence_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    question_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    question_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)

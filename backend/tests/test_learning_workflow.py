@@ -4,6 +4,7 @@ from notepatch.platform.config import get_settings
 from notepatch.modules.documents.models.document import DocumentArtifact
 from notepatch.modules.learning.models.homework import GradingResult, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
+from notepatch.modules.learning.services.content_operations import LearningContentOperations
 from notepatch.modules.learning.models.learning import (
     Flashcard,
     FlashcardDeck,
@@ -74,7 +75,7 @@ def _latest_task(db, workspace_id: str, task_type: str, resource_id: str | None 
     return task
 
 
-def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmaker, fake_storage):
+def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmaker, fake_storage, monkeypatch):
     settings, old_auto = _set_auto_learning(True)
     try:
         user = register_user(client, "learning-courseware@example.com")
@@ -133,6 +134,44 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
             cards = db.scalars(select(Flashcard).where(Flashcard.deck_id == deck.id)).all()
             assert len(cards) == 2
             assert cards[0].knowledge_point_id == cards[1].knowledge_point_id
+
+            duplicate_task = TaskService(db).create_task(
+                workspace_id=workspace_id,
+                task_type="generate_flashcards",
+                resource_type="learning_unit",
+                resource_id=learning_unit.id,
+                payload={
+                    "learning_unit_id": learning_unit.id,
+                    "study_note_version_id": note.id,
+                    "expected_attempt_revision": learning_unit.attempt_revision,
+                },
+                enqueue=False,
+            )
+            original_lookup = LearningContentOperations._flashcard_deck_for_revision
+            lookup_count = 0
+
+            def simulate_concurrent_insert(service, **kwargs):
+                nonlocal lookup_count
+                lookup_count += 1
+                if lookup_count == 1:
+                    return None
+                return original_lookup(service, **kwargs)
+
+            monkeypatch.setattr(
+                LearningContentOperations,
+                "_flashcard_deck_for_revision",
+                simulate_concurrent_insert,
+            )
+            process_task(db, duplicate_task.id, storage=fake_storage)
+            db.refresh(duplicate_task)
+            assert duplicate_task.status == "succeeded"
+            assert duplicate_task.result["reused"] is True
+            assert duplicate_task.result["flashcard_deck_id"] == deck.id
+            assert len(
+                db.scalars(
+                    select(FlashcardDeck).where(FlashcardDeck.learning_unit_id == learning_unit.id)
+                ).all()
+            ) == 1
 
         units = client.get(f"/api/v1/workspaces/{workspace_id}/learning-units", headers=auth_headers(user["access_token"]))
         assert units.status_code == 200, units.text

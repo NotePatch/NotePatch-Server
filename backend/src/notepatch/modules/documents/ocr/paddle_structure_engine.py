@@ -18,6 +18,8 @@ class PaddleStructureEngine:
     version = "3.7.0"
 
     def __init__(self, options: OcrOptions) -> None:
+        if options.paddleocr_use_gpu:
+            _assert_cuda_runtime()
         try:
             from paddleocr import PPStructureV3
         except Exception as exc:
@@ -66,6 +68,26 @@ class PaddleStructureEngine:
         payload = _result_to_dict(raw_results[0])
         blocks = _normalize_structure_blocks(payload, page_index)
         return OcrPageResult(page_index=page_index, width=width, height=height, blocks=blocks)
+
+
+
+def _assert_cuda_runtime() -> None:
+    """Fail before model loading when a stale container silently falls back to CPU."""
+    try:
+        import paddle
+
+        if not paddle.device.is_compiled_with_cuda():
+            raise RuntimeError("PaddlePaddle was not compiled with CUDA support")
+        if paddle.device.cuda.device_count() < 1:
+            raise RuntimeError("No CUDA device is visible")
+        paddle.set_device("gpu:0")
+        probe = paddle.ones([1], dtype="float32")
+        probe.numpy()
+        selected_device = paddle.device.get_device()
+        if not selected_device.startswith("gpu"):
+            raise RuntimeError(f"Paddle selected {selected_device} instead of gpu:0")
+    except Exception as exc:
+        raise PaddleStructureUnavailable(f"Paddle CUDA runtime is unavailable: {exc}") from exc
 
 
 def _result_to_dict(item: Any) -> dict[str, Any]:

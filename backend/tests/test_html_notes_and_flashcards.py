@@ -13,6 +13,7 @@ from notepatch.modules.learning.models.learning import (
 from notepatch.modules.learning.services.flashcard_priority import FlashcardPriorityService
 from notepatch.modules.learning.services.html_notes import sanitize_note_html
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
+from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.database import utcnow
 from tests.conftest import FakeRedis, auth_headers, first_workspace_id, register_user
@@ -122,6 +123,31 @@ def test_flashcard_priority_rewards_recent_errors_and_recent_correct_streak_redu
         assert latest_error["priority_factors"]["recent_correct_streak"] == 0
 
 
+
+
+def test_attempt_revision_refreshes_under_lock(db_sessionmaker):
+    with db_sessionmaker() as make_db:
+        unit = LearningUnit(workspace_id="attempt-lock-workspace", title="Concurrent grading")
+        make_db.add(unit)
+        make_db.commit()
+        unit_id = unit.id
+
+    first = db_sessionmaker()
+    second = db_sessionmaker()
+    try:
+        stale_unit = first.get(LearningUnit, unit_id)
+        concurrent_unit = second.get(LearningUnit, unit_id)
+        concurrent_unit.attempt_revision = 1
+        second.commit()
+
+        refreshed = LearningWorkflowService(first)._increment_attempt_revision(stale_unit)
+        first.commit()
+        assert refreshed.attempt_revision == 2
+    finally:
+        first.close()
+        second.close()
+
+
 def test_study_note_debounce_reuses_and_reschedules_one_task(client, db_sessionmaker, monkeypatch):
     user = register_user(client, "note-debounce@example.com")
     workspace_id = first_workspace_id(client, user["access_token"])
@@ -142,6 +168,35 @@ def test_study_note_debounce_reuses_and_reschedules_one_task(client, db_sessionm
         assert second.next_attempt_at >= first_due
         assert not any(fake_redis.lists.values())
         assert sum(len(items) for items in fake_redis.zsets.values()) == 1
+
+
+
+
+def test_flashcard_scheduling_reuses_same_source_revision(
+    client, db_sessionmaker, monkeypatch
+):
+    user = register_user(client, "flashcard-schedule-dedupe@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(
+        "notepatch.modules.tasks.services.task.redis.from_url",
+        lambda *_args, **_kwargs: fake_redis,
+    )
+    with db_sessionmaker() as db:
+        unit, _point, note = _seed_note(db, workspace_id, "Deduplicated cards")
+        workflow = LearningWorkflowService(db)
+        first = workflow.schedule_flashcards(unit, note, reason="study_note_generated")
+        second = workflow.schedule_flashcards(unit, note, reason="homework_graded")
+        assert second.id == first.id
+        assert len(
+            db.scalars(
+                select(Task).where(
+                    Task.workspace_id == workspace_id,
+                    Task.task_type == "generate_flashcards",
+                    Task.resource_id == unit.id,
+                )
+            ).all()
+        ) == 1
 
 
 def test_flashcard_deck_apis_are_workspace_scoped(client, db_sessionmaker):

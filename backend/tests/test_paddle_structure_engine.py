@@ -1,7 +1,15 @@
 from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+import pytest
 
 from notepatch.modules.documents.ocr.base import OcrOptions
-from notepatch.modules.documents.ocr.paddle_structure_engine import PaddleStructureEngine
+from notepatch.modules.documents.ocr.paddle_structure_engine import (
+    PaddleStructureEngine,
+    PaddleStructureUnavailable,
+    _assert_cuda_runtime,
+)
 from tests.test_doctr_worker import PNG_BYTES
 
 
@@ -37,6 +45,37 @@ def _engine(payload) -> PaddleStructureEngine:
     engine = PaddleStructureEngine.__new__(PaddleStructureEngine)
     engine.pipeline = FakeStructurePipeline(payload)
     return engine
+
+
+def test_cuda_runtime_probe_rejects_silent_cpu_fallback(monkeypatch) -> None:
+    fake_paddle = SimpleNamespace(
+        device=SimpleNamespace(
+            is_compiled_with_cuda=lambda: True,
+            cuda=SimpleNamespace(device_count=lambda: 1),
+            get_device=lambda: "cpu",
+        ),
+        set_device=lambda _device: None,
+        ones=lambda *_args, **_kwargs: SimpleNamespace(numpy=lambda: [1.0]),
+    )
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+
+    with pytest.raises(PaddleStructureUnavailable, match="instead of gpu:0"):
+        _assert_cuda_runtime()
+
+
+def test_cuda_runtime_probe_accepts_working_gpu(monkeypatch) -> None:
+    fake_paddle = SimpleNamespace(
+        device=SimpleNamespace(
+            is_compiled_with_cuda=lambda: True,
+            cuda=SimpleNamespace(device_count=lambda: 1),
+            get_device=lambda: "gpu:0",
+        ),
+        set_device=lambda _device: None,
+        ones=lambda *_args, **_kwargs: SimpleNamespace(numpy=lambda: [1.0]),
+    )
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+
+    _assert_cuda_runtime()
 
 
 def _image(tmp_path: Path) -> Path:

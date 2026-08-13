@@ -6,6 +6,7 @@ from notepatch.modules.learning.models.homework import GradingResult, Homework, 
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
     KnowledgePoint,
+    LearningUnit,
     KnowledgePointAttempt,
     StudyNoteVersion,
 )
@@ -141,7 +142,7 @@ class LearningGradingOperations:
                 )
                 attempts_created += 1
         if unit is not None and attempts_created:
-            unit.attempt_revision += 1
+            unit = self._increment_attempt_revision(unit)
         mistake_chunks: list[KnowledgeChunk] = []
         mistakes: list[Mistake] = []
         for item in result.mistakes:
@@ -253,6 +254,21 @@ class LearningGradingOperations:
             "attempt_revision": unit.attempt_revision if unit else None,
             "flashcard_task_id": flashcard_task.id if flashcard_task else None,
         }
+
+    def _increment_attempt_revision(self, unit: LearningUnit) -> LearningUnit:
+        locked_unit = self.db.scalar(
+            select(LearningUnit)
+            .where(
+                LearningUnit.workspace_id == unit.workspace_id,
+                LearningUnit.id == unit.id,
+            )
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if locked_unit is None:
+            raise PermanentTaskError("Learning unit not found")
+        locked_unit.attempt_revision += 1
+        return locked_unit
 
     def highlight_study_notes(self, task: Task, storage: StorageService) -> dict:
         unit = self._learning_unit(task.payload.get("learning_unit_id") or task.resource_id, task.workspace_id)

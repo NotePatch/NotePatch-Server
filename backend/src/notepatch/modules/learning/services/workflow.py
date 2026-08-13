@@ -344,6 +344,9 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
         return task
 
     def schedule_flashcards(self, unit: LearningUnit, note: StudyNoteVersion, *, reason: str) -> Task:
+        existing, expected_attempt_revision = self._flashcard_task_for_revision(unit, note)
+        if existing is not None:
+            return existing
         return TaskService(self.db).create_task(
             workspace_id=unit.workspace_id,
             task_type="generate_flashcards",
@@ -352,7 +355,7 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
             payload={
                 "learning_unit_id": unit.id,
                 "study_note_version_id": note.id,
-                "expected_attempt_revision": unit.attempt_revision,
+                "expected_attempt_revision": expected_attempt_revision,
                 "reason": reason,
             },
         )

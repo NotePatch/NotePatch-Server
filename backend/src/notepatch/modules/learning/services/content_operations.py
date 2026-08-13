@@ -374,13 +374,11 @@ class LearningContentOperations:
             return {"learning_unit_id": unit.id, "skipped": True, "reason": "no_study_note"}
         expected_note_id = task.payload.get("study_note_version_id") or note.id
         expected_attempt_revision = int(task.payload.get("expected_attempt_revision", unit.attempt_revision))
-        existing_deck = self.db.scalar(
-            select(FlashcardDeck).where(
-                FlashcardDeck.workspace_id == task.workspace_id,
-                FlashcardDeck.learning_unit_id == unit.id,
-                FlashcardDeck.study_note_version_id == expected_note_id,
-                FlashcardDeck.attempt_revision == expected_attempt_revision,
-            )
+        existing_deck = self._flashcard_deck_for_revision(
+            workspace_id=task.workspace_id,
+            learning_unit_id=unit.id,
+            study_note_version_id=expected_note_id,
+            attempt_revision=expected_attempt_revision,
         )
         if existing_deck is not None:
             return {"learning_unit_id": unit.id, "flashcard_deck_id": existing_deck.id, "reused": True}
@@ -441,6 +439,16 @@ class LearningContentOperations:
         if len(fingerprints) != len(result.flashcards):
             raise PermanentTaskError("Flashcards contain duplicate card content")
         locked_unit = self.db.scalar(select(LearningUnit).where(LearningUnit.id == unit.id).with_for_update())
+        existing_deck = self._flashcard_deck_for_revision(
+            workspace_id=task.workspace_id,
+            learning_unit_id=unit.id,
+            study_note_version_id=expected_note_id,
+            attempt_revision=expected_attempt_revision,
+        )
+        if existing_deck is not None:
+            del locked_unit
+            self.db.commit()
+            return {"learning_unit_id": unit.id, "flashcard_deck_id": existing_deck.id, "reused": True}
         version_no = int(
             self.db.scalar(
                 select(func.coalesce(func.max(FlashcardDeck.version_no), 0)).where(
@@ -487,3 +495,60 @@ class LearningContentOperations:
             "cards_created": len(result.flashcards),
             **run,
         }
+
+    def _flashcard_deck_for_revision(
+        self,
+        *,
+        workspace_id: str,
+        learning_unit_id: str,
+        study_note_version_id: str,
+        attempt_revision: int,
+    ) -> FlashcardDeck | None:
+        return self.db.scalar(
+            select(FlashcardDeck).where(
+                FlashcardDeck.workspace_id == workspace_id,
+                FlashcardDeck.learning_unit_id == learning_unit_id,
+                FlashcardDeck.study_note_version_id == study_note_version_id,
+                FlashcardDeck.attempt_revision == attempt_revision,
+            )
+        )
+
+    def _flashcard_task_for_revision(
+        self,
+        unit: LearningUnit,
+        note: StudyNoteVersion,
+    ) -> tuple[Task | None, int]:
+        locked_unit = self.db.scalar(
+            select(LearningUnit).where(
+                LearningUnit.workspace_id == unit.workspace_id,
+                LearningUnit.id == unit.id,
+            ).with_for_update()
+        )
+        if locked_unit is None:
+            raise PermanentTaskError("Learning unit not found")
+        expected_attempt_revision = locked_unit.attempt_revision
+        candidates = self.db.scalars(
+            select(Task)
+            .where(
+                Task.workspace_id == unit.workspace_id,
+                Task.task_type == "generate_flashcards",
+                Task.resource_type == "learning_unit",
+                Task.resource_id == unit.id,
+                Task.status.in_(("queued", "running", "succeeded")),
+                Task.cancel_requested_at.is_(None),
+            )
+            .order_by(Task.created_at.desc())
+        ).all()
+        existing = next(
+            (
+                task
+                for task in candidates
+                if (task.payload or {}).get("study_note_version_id") == note.id
+                and int((task.payload or {}).get("expected_attempt_revision", -1))
+                == expected_attempt_revision
+            ),
+            None,
+        )
+        if existing is not None:
+            self.db.commit()
+        return existing, expected_attempt_revision

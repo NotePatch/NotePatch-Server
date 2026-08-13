@@ -148,7 +148,7 @@ def test_paddleocr_unavailable_fails_after_retry_budget(
                     ocr_pipeline=OcrPipeline(),
                 )
             assert task.status == "failed"
-            assert "PP-StructureV3 is not available" in (task.error_message or "")
+            assert "Paddle CUDA runtime is unavailable" in (task.error_message or "")
     finally:
         pass
 

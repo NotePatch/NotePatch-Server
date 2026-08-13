@@ -11,7 +11,7 @@ class StrictResult(BaseModel):
 
 class ExtractedQuestion(StrictResult):
     sequence_no: int = Field(ge=1)
-    question_type: str | None = None
+    question_type: str | None = Field(default=None, max_length=255)
     prompt: str = Field(min_length=1)
     answer: str | None = None
     page_refs: list[int] = Field(default_factory=list)

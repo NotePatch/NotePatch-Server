@@ -8,7 +8,7 @@ x-backend: &backend
     args:
       RELEASE_REVISION: ${GIT_SHA:-dev}
       RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
-      SCHEMA_REVISION: 202608130001
+      SCHEMA_REVISION: 202608140001
   env_file:
     - path: .env
       required: false
@@ -131,7 +131,7 @@ services:
       embedding-service:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/notepatch-ocr-worker-ready && python -c 'import paddle, cv2; assert paddle.device.is_compiled_with_cuda()'"]
+      test: ["CMD-SHELL", "test -f /tmp/notepatch-ocr-worker-ready && python -c 'from notepatch.modules.documents.ocr.paddle_structure_engine import _assert_cuda_runtime; _assert_cuda_runtime()'"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -252,7 +252,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       RESTIC_REPOSITORY: /backups/restic
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
-      SCHEMA_REVISION: 202608130001
+      SCHEMA_REVISION: 202608140001
       RELEASE_REVISION: ${GIT_SHA:-dev}
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups
