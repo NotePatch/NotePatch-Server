@@ -8,7 +8,6 @@ from notepatch.platform.database import Base, utcnow
 
 
 TASK_TYPES = {
-    "preprocess_image",
     "ocr_document",
     "extract_questions",
     "grade_homework",

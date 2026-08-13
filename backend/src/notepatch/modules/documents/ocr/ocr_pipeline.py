@@ -54,7 +54,9 @@ class OcrPipeline:
             raise OcrPipelineError(
                 f"Unsupported production OCR_ENGINE={options.engine!r}; only 'paddleocr' is allowed"
             )
-        engine = self.engine or PaddleStructureEngine(options)
+        if self.engine is None:
+            self.engine = PaddleStructureEngine(options)
+        engine = self.engine
         runtime_options = options
 
         event_callback = event_callback or (lambda _event, _message, _data: None)

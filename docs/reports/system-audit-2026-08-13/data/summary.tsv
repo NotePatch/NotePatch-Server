@@ -1,0 +1,62 @@
+task_type	ok	failed	cancelled	avg_run_s	max_run_s
+build_knowledge_base	8	1	0	55.301	92.677
+document_processing_pipeline	12	0	0	12.922	17.331
+extract_questions	2	0	0	65.273	67.506
+generate_flashcards	5	2	1	45.524	69.642
+generate_study_notes	6	1	0	84.991	107.643
+grade_homework	3	0	0	88.584	97.582
+highlight_study_notes	2	0	0	129.348	150.594
+merge_learning_units	1	0	0	0.142	0.142
+openclaw_agent_run	3	0	0	32.231	67.496
+scan_document	6	3	0	0.071	0.109
+(10 rows)
+artifact_type	versions	bytes
+converted_pdf	3	54505
+deskewed_image	5	9956510
+formula_json	12	216
+layout_json	12	63422
+ocr_json	12	99804
+ocr_markdown	12	12643
+ocr_text	12	12468
+original	6	202135
+questions_json	2	0
+tables_json	12	216
+(10 rows)
+event_type	count
+ai_model_selected	32
+cancelled	1
+conversion_started	3
+conversion_succeeded	3
+doctr_health	5
+doctr_running	5
+doctr_succeeded	5
+failed	7
+flashcards_started	9
+gpu_lease_acquired	28
+gpu_lease_released	28
+gpu_lease_waiting	28
+grading_started	4
+knowledge_build_started	12
+knowledge_retrieved	3
+merge_claimed	1
+merge_started	1
+note_highlight_skipped	3
+note_highlight_started	2
+ocr_artifacts_uploaded	12
+ocr_page_completed	11
+ocr_rendered	12
+ocr_started	12
+openclaw_prepare	3
+openclaw_run	3
+orphan_requeued	1
+question_extraction_started	4
+queued	56
+retry_scheduled	10
+running	66
+scan_rejected	3
+scan_started	9
+scan_succeeded	6
+scheduled	8
+study_notes_started	10
+succeeded	48
+(36 rows)

@@ -17,6 +17,7 @@ def openclaw_settings(tmp_path):
         "openclaw_gateway_model": settings.openclaw_gateway_model,
         "openclaw_agent_model": settings.openclaw_agent_model,
         "openclaw_gateway_timeout_seconds": settings.openclaw_gateway_timeout_seconds,
+        "openclaw_skill_timeout_seconds": settings.openclaw_skill_timeout_seconds,
         "openclaw_gateway_ready_timeout_seconds": settings.openclaw_gateway_ready_timeout_seconds,
         "openclaw_gateway_ready_poll_seconds": settings.openclaw_gateway_ready_poll_seconds,
         "openclaw_gateway_scopes": settings.openclaw_gateway_scopes,
@@ -28,6 +29,7 @@ def openclaw_settings(tmp_path):
     settings.openclaw_gateway_model = "openclaw"
     settings.openclaw_agent_model = "openai/gpt-5.4"
     settings.openclaw_gateway_timeout_seconds = 5
+    settings.openclaw_skill_timeout_seconds = 300
     settings.openclaw_gateway_ready_timeout_seconds = 0
     settings.openclaw_gateway_ready_poll_seconds = 0.01
     settings.openclaw_gateway_scopes = "operator.write"
@@ -185,6 +187,28 @@ def test_gateway_runner_ignores_provider_model_for_gateway_request(openclaw_sett
     assert result["model"] == "openclaw"
     assert result["provider_model"] == "openai/gpt-5.4"
 
+
+
+def test_gateway_runner_honors_per_task_timeout(openclaw_settings):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["timeout"] = request.extensions["timeout"]["read"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    runner.run_task(
+        "workspace-1",
+        "task-1",
+        {
+            "prompt": "generate notes",
+            "input": {},
+            "options": {},
+            "_openclaw": {"timeout_seconds": 300},
+        },
+    )
+
+    assert captured["timeout"] == 300.0
 
 def test_gateway_runner_raises_readable_error_for_http_failure(openclaw_settings):
     client = httpx.Client(

@@ -1,0 +1,17 @@
+id	title	subject	grade_level	knowledge_revision	attempt_revision	notes_generated_revision	merge_status	merged_into_id
+0b796416-b4da-43f3-855f-700cfcd4c8c8	image_note	English	IGCSE	3	3	3	completed
+4fab8a47-5f46-4fce-8261-237a408a7405	docx_note	Mathematics	IGCSE	2	0	2
+bfa2906d-b1b9-4115-a615-b96fa2e46e7d	pptx_courseware	Physics	IGCSE	1	0	1
+3cd658cd-4ae5-41b0-8b4b-2254b00e88e4	math_answer_key	Mathematics 0580	IGCSE	0	0	0
+25e7d32f-6bcb-4975-b869-a389a8f86fb2	math_homework	Mathematics 0580	IGCSE	0	0	0	merged	0b796416-b4da-43f3-855f-700cfcd4c8c8
+75bf8773-20f6-4cf7-afcb-bed6f283979e	eicar_pdf			0	0	0
+(6 rows)
+?column?	count	count	coalesce	coalesce
+chunks	17	17	1024	1024
+(1 row)
+?column?	count
+points	28
+(1 row)
+?column?	count	count	count	count
+attempts	20	3	14	3
+(1 row)

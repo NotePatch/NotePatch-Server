@@ -2,11 +2,13 @@ import argparse
 import logging
 import signal
 import sys
+import time
 
 import redis
 
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import SessionLocal
+from notepatch.modules.documents.ocr import OcrPipeline
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.queue import (
     parse_queue_names,
@@ -16,6 +18,7 @@ from notepatch.modules.tasks.services.queue import (
     promote_due_retries,
 )
 from notepatch.modules.tasks.services.executor import process_task
+from notepatch.modules.tasks.services.task_lease import TaskLease, recover_orphaned_tasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,6 +38,10 @@ def queue_names_from_args(value: str | None) -> list[str]:
 
 def redis_keys_for_worker_queues(queue_names: list[str]) -> list[str]:
     return redis_keys_for_queue_names(get_settings(), queue_names)
+
+
+def ocr_pipeline_for_worker_queues(queue_names: list[str]) -> OcrPipeline | None:
+    return OcrPipeline() if get_settings().ocr_queue_name in queue_names else None
 
 
 def _decode_redis_value(value) -> str:
@@ -70,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     queue_names = queue_names_from_args(args.queues)
     redis_keys = redis_keys_for_worker_queues(queue_names)
     client = redis.from_url(settings.redis_url)
+    ocr_pipeline = ocr_pipeline_for_worker_queues(queue_names)
     logger.info("Worker listening on queues %s (%s)", ", ".join(queue_names), ", ".join(redis_keys))
+    last_orphan_recovery = 0.0
 
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
@@ -80,6 +89,16 @@ def main(argv: list[str] | None = None) -> int:
             promote_due_retries(client, settings, queue_names)
         except Exception as exc:
             logger.warning("Could not promote delayed retries: %s", exc)
+        now = time.monotonic()
+        if now - last_orphan_recovery >= settings.task_orphan_recovery_interval_seconds:
+            try:
+                with SessionLocal() as recovery_db:
+                    recovered = recover_orphaned_tasks(client, recovery_db, queue_names)
+                if recovered:
+                    logger.warning("Recovered %s orphaned task(s)", recovered)
+            except Exception as exc:
+                logger.warning("Could not recover orphaned tasks: %s", exc)
+            last_orphan_recovery = now
         item = client.brpop(redis_keys, timeout=5)
         if item is None:
             continue
@@ -90,7 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         with SessionLocal() as db:
             if _requeue_if_misrouted(client, db, task_id, queue_key):
                 continue
-            process_task(db, task_id)
+        with TaskLease(client, task_id) as lease:
+            if not lease.acquired:
+                logger.warning("Task %s already has an active worker lease; skipped duplicate queue item", task_id)
+                continue
+            with SessionLocal() as db:
+                process_task(db, task_id, ocr_pipeline=ocr_pipeline)
     logger.info("Worker stopped")
     return 0
 

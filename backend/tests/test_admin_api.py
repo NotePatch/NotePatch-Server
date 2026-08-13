@@ -121,6 +121,9 @@ def test_admin_can_query_users_documents_tasks_and_download_urls(client, fake_st
     assert task_detail.json()["payload"]["document_id"] == document_id
     assert task_events.status_code == 200
     assert task_events.json()[0]["event_type"] == "queued"
+    assert [item["sequence_no"] for item in task_events.json()] == list(
+        range(1, len(task_events.json()) + 1)
+    )
     assert overview.status_code == 200
     assert overview.json()["users_count"] >= 2
 

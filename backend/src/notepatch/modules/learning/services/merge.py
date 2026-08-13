@@ -4,6 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.documents.models.document import Document
+from notepatch.modules.learning.models.homework import Homework, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
     FlashcardDeck,
@@ -68,6 +69,10 @@ class LearningUnitMergeService:
         document_ids = list(document_roles)
         self._cancel_related_tasks(task, unit_ids, document_ids)
         self._merge_knowledge_points(task.workspace_id, target.id, source_ids)
+        self._retarget_homeworks(task.workspace_id, target.id, unit_ids, document_ids)
+        target.attempt_revision = sum(unit.attempt_revision for unit in (target, *sources))
+        for source in sources:
+            source.attempt_revision = 0
 
         decks = self.db.scalars(
             select(FlashcardDeck).where(
@@ -209,10 +214,20 @@ class LearningUnitMergeService:
                     KnowledgePointAttempt.knowledge_point_id == point.id,
                 )
             ).all()
+            mistakes = self.db.scalars(
+                select(Mistake).where(
+                    Mistake.workspace_id == workspace_id,
+                    Mistake.knowledge_point_id == point.id,
+                )
+            ).all()
             if duplicate is None:
                 point.learning_unit_id = target_id
                 for attempt in attempts:
                     attempt.learning_unit_id = target_id
+                for mistake in mistakes:
+                    metadata = dict(mistake.metadata_ or {})
+                    metadata["learning_unit_id"] = target_id
+                    mistake.metadata_ = metadata
                 target_points[point.normalized_name] = point
                 continue
             duplicate.source_document_ids = sorted(
@@ -231,7 +246,48 @@ class LearningUnitMergeService:
                 else:
                     attempt.knowledge_point_id = duplicate.id
                     attempt.learning_unit_id = target_id
+            for mistake in mistakes:
+                mistake.knowledge_point_id = duplicate.id
+                metadata = dict(mistake.metadata_ or {})
+                metadata["learning_unit_id"] = target_id
+                mistake.metadata_ = metadata
             self.db.delete(point)
+
+        stray_attempts = self.db.scalars(
+            select(KnowledgePointAttempt).where(
+                KnowledgePointAttempt.workspace_id == workspace_id,
+                KnowledgePointAttempt.learning_unit_id.in_(source_ids),
+            )
+        ).all()
+        for attempt in stray_attempts:
+            attempt.learning_unit_id = target_id
+        mistakes = self.db.scalars(
+            select(Mistake).where(Mistake.workspace_id == workspace_id)
+        ).all()
+        source_id_set = set(source_ids)
+        for mistake in mistakes:
+            metadata = dict(mistake.metadata_ or {})
+            if metadata.get("learning_unit_id") in source_id_set:
+                metadata["learning_unit_id"] = target_id
+                mistake.metadata_ = metadata
+
+    def _retarget_homeworks(
+        self,
+        workspace_id: str,
+        target_id: str,
+        unit_ids: list[str],
+        document_ids: list[str],
+    ) -> None:
+        homeworks = self.db.scalars(
+            select(Homework).where(Homework.workspace_id == workspace_id)
+        ).all()
+        document_id_set = set(document_ids)
+        unit_id_set = set(unit_ids)
+        for homework in homeworks:
+            metadata = dict(homework.metadata_ or {})
+            if metadata.get("learning_unit_id") in unit_id_set or homework.document_id in document_id_set:
+                metadata["learning_unit_id"] = target_id
+                homework.metadata_ = metadata
 
 
 def reconcile_learning_unit_merge(db: Session, completed_task: Task) -> None:
@@ -246,12 +302,24 @@ def reconcile_learning_unit_merge(db: Session, completed_task: Task) -> None:
             select(LearningUnit).where(
                 LearningUnit.workspace_id == completed_task.workspace_id,
                 LearningUnit.id == unit_id,
-                LearningUnit.merge_status == "rebuilding",
+                LearningUnit.merge_status.in_(("rebuilding", "failed")),
             )
         )
         if unit is None:
             continue
         metadata = dict(unit.metadata_ or {})
+        retry_of_task_id = (completed_task.payload or {}).get("retry_of_task_id")
+        if unit.merge_status == "failed":
+            if (
+                completed_task.status != "succeeded"
+                or not retry_of_task_id
+                or retry_of_task_id != metadata.get("merge_failed_task_id")
+            ):
+                continue
+            unit.merge_status = "rebuilding"
+            metadata.pop("merge_failed_task_id", None)
+            metadata.pop("merge_failed_task_type", None)
+            unit.metadata_ = metadata
         if completed_task.status in {"failed", "cancelled"}:
             unit.merge_status = "failed"
             metadata["merge_failed_task_id"] = completed_task.id

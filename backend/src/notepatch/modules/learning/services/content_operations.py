@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
-from notepatch.modules.learning.models.homework import Question
+from notepatch.modules.learning.models.homework import Mistake, Question
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
     Flashcard,
@@ -155,6 +155,13 @@ class LearningContentOperations:
             vectors={item.title: vector for item, vector in zip(result.chunks, vectors, strict=True)},
             owner=f"task:{task.id}:knowledge-points",
         )
+        if bool(task.payload.get("force_reprocess")):
+            self.db.execute(
+                delete(KnowledgeChunk).where(
+                    KnowledgeChunk.workspace_id == task.workspace_id,
+                    KnowledgeChunk.document_id == document.id,
+                )
+            )
         chunk_ids: list[str] = []
         for item, vector in zip(result.chunks, vectors, strict=True):
             chunk = KnowledgeChunk(
@@ -214,12 +221,22 @@ class LearningContentOperations:
         chunks = self._unit_chunks(unit.id, task.workspace_id)
         if not chunks:
             raise PermanentTaskError("Cannot generate study notes before knowledge chunks exist")
-        points = self.db.scalars(
-            select(KnowledgePoint).where(
-                KnowledgePoint.workspace_id == task.workspace_id,
-                KnowledgePoint.learning_unit_id == unit.id,
-            )
-        ).all()
+        current_point_ids = {
+            str((chunk.metadata_ or {}).get("knowledge_point_id"))
+            for chunk in chunks
+            if (chunk.metadata_ or {}).get("knowledge_point_id")
+        }
+        points = (
+            self.db.scalars(
+                select(KnowledgePoint).where(
+                    KnowledgePoint.workspace_id == task.workspace_id,
+                    KnowledgePoint.learning_unit_id == unit.id,
+                    KnowledgePoint.id.in_(current_point_ids),
+                )
+            ).all()
+            if current_point_ids
+            else []
+        )
         result, run = self._skill().execute(
             task=task,
             skill_name="notepatch_scholar_notes",
@@ -300,12 +317,46 @@ class LearningContentOperations:
         self.db.commit()
         self._ensure_active(task)
         flashcard_task = self.schedule_flashcards(unit, note, reason="study_note_generated")
+        downstream_tasks = [flashcard_task]
+        mistakes = self.db.scalars(
+            select(Mistake).where(
+                Mistake.workspace_id == task.workspace_id,
+                Mistake.status == "open",
+            )
+        ).all()
+        mistake_ids = [
+            mistake.id
+            for mistake in mistakes
+            if (mistake.metadata_ or {}).get("learning_unit_id") == unit.id
+        ]
+        if mistake_ids:
+            downstream_tasks.extend(
+                self._create_unique_tasks(
+                    [
+                        (
+                            "highlight_study_notes",
+                            "learning_unit",
+                            unit.id,
+                            {
+                                "learning_unit_id": unit.id,
+                                "mistake_ids": mistake_ids,
+                                "expected_note_version_id": note.id,
+                                "reason": "study_note_generated",
+                            },
+                        )
+                    ],
+                    force_reprocess=True,
+                )
+            )
         return {
             "learning_unit_id": unit.id,
             "study_note_version_id": note.id,
             "html_key": html_key,
             "json_key": json_key,
-            "downstream_tasks": [{"id": flashcard_task.id, "task_type": flashcard_task.task_type}],
+            "downstream_tasks": [
+                {"id": downstream.id, "task_type": downstream.task_type}
+                for downstream in downstream_tasks
+            ],
         }
 
     def generate_flashcards(self, task: Task, storage: StorageService) -> dict:
@@ -380,8 +431,15 @@ class LearningContentOperations:
             }
         candidates = {item["id"]: item for item in weighted_points}
         returned_ids = [item.knowledge_point_id for item in result.flashcards]
-        if len(returned_ids) != len(set(returned_ids)) or not set(returned_ids).issubset(candidates):
-            raise PermanentTaskError("Flashcards contain duplicate or unknown knowledge point ids")
+        unknown_ids = sorted(set(returned_ids) - set(candidates))
+        if unknown_ids:
+            raise PermanentTaskError(f"Flashcards contain unknown knowledge point ids: {unknown_ids}")
+        fingerprints = {
+            (item.front.strip().casefold(), item.back.strip().casefold())
+            for item in result.flashcards
+        }
+        if len(fingerprints) != len(result.flashcards):
+            raise PermanentTaskError("Flashcards contain duplicate card content")
         locked_unit = self.db.scalar(select(LearningUnit).where(LearningUnit.id == unit.id).with_for_update())
         version_no = int(
             self.db.scalar(

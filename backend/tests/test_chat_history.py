@@ -115,6 +115,14 @@ def test_chat_history_toggle_controls_openclaw_context_without_deleting_messages
     assert client.get("/api/v1/auth/me", headers=auth_headers(token)).json()["ai_history_enabled"] is False
 
     third = create_chat(client, token, workspace_id, "第三条问题", conversation_id)
+    assert third["payload"]["ai_history_enabled"] is False
+    # Preference changes after submission affect only future tasks, not this queued task.
+    enabled = client.patch(
+        "/api/v1/auth/preferences",
+        headers=auth_headers(token),
+        json={"ai_history_enabled": True},
+    )
+    assert enabled.status_code == 200
     with db_sessionmaker() as db:
         process_task(db, third["id"], storage=fake_storage, openclaw_runner=runner)
     assert runner.payloads[-1]["conversation_messages"] == []

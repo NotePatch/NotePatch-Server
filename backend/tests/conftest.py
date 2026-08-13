@@ -123,6 +123,11 @@ class FakeRedis:
         self.values[key] = value
         return True
 
+    def get(self, key: str):
+        if self.fail_reads:
+            raise RuntimeError("redis unavailable")
+        return self.values.get(key)
+
     def delete(self, key: str) -> int:
         existed = key in self.values
         self.values.pop(key, None)

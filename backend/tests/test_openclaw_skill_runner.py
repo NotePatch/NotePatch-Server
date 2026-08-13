@@ -119,3 +119,46 @@ def test_skill_runner_rejects_persistently_invalid_output(db_sessionmaker, fake_
             output_filename="questions.json",
             schema=QuestionExtractionResult,
         )
+
+
+def test_skill_runner_reuses_valid_output_from_previous_attempt(db_sessionmaker, fake_storage, tmp_path):
+    task = _task()
+    task.attempt = 2
+    output = tmp_path / task.id / "output" / "questions.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "questions": [
+                    {
+                        "sequence_no": 1,
+                        "question_type": "short_answer",
+                        "prompt": "What is 2 + 2?",
+                        "answer": "4",
+                        "page_refs": [0],
+                        "evidence": "2 + 2 = 4",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    gateway = CorrectingRunner()
+
+    with db_sessionmaker() as db:
+        result, metadata = OpenClawSkillRunner(
+            db=db,
+            storage=fake_storage,
+            gateway_runner=gateway,
+            runtime_service=RuntimeStub(tmp_path),
+        ).execute(
+            task=task,
+            skill_name="notepatch_question_extractor",
+            input_payload={"ocr_text": "2 + 2 = 4"},
+            output_filename="questions.json",
+            schema=QuestionExtractionResult,
+        )
+
+    assert result.questions[0].answer == "4"
+    assert gateway.calls == []
+    assert metadata["run_result"]["reused_output"] is True

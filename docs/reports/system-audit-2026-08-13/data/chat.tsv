@@ -1,0 +1,11 @@
+id	title	deleted_at	messages	assistant_succeeded
+0c4654ec-e80e-4d9d-bafe-ee7efba9048e	根据我上传的数学作业，概括最需要复习的两个知识点，并引用资料。		6	3
+(1 row)
+id	role	status	model_id	source_status	citations	chars	created_at
+b3ab2a82-2ee0-4b9a-9675-20fa9a827896	user	succeeded		available	0	31	2026-08-13 12:38:39.519692+00
+f8963bf0-17d6-402b-82d2-a38dfa04a745	assistant	succeeded	openai/gpt-5.5	available	6	548	2026-08-13 12:38:39.519706+00
+e8b94b29-9106-4090-adca-810fa6adce5c	user	succeeded		available	0	20	2026-08-13 12:43:02.828575+00
+bcf0ca7f-a0a3-4504-b79d-be27c439a14f	assistant	succeeded	openai/gpt-5.5	available	6	2	2026-08-13 12:43:02.828586+00
+0c073030-f61c-411f-ab17-86417f4357f5	user	succeeded		available	0	152	2026-08-13 13:11:44.297672+00
+4840e287-2958-4cde-913d-239c4d5c6f9b	assistant	succeeded	openai/gpt-5.5	available	6	10	2026-08-13 13:11:44.297682+00
+(6 rows)

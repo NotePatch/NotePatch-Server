@@ -214,6 +214,83 @@ def test_learning_unit_merge_is_async_and_workspace_scoped(client, db_sessionmak
     assert cross_workspace.status_code == 404
 
 
+
+def test_merge_retargets_homework_attempts_and_mistakes(db_sessionmaker, fake_storage):
+    from notepatch.modules.identity.models.workspace import Workspace
+    from notepatch.modules.learning.models.homework import Homework, Mistake
+    from notepatch.modules.learning.models.learning import KnowledgePoint, KnowledgePointAttempt
+    from notepatch.modules.learning.services.merge import LearningUnitMergeService
+
+    with db_sessionmaker() as db:
+        workspace_id = _workspace_id(db)
+        owner_id = db.get(Workspace, workspace_id).owner_user_id
+        target = LearningUnit(workspace_id=workspace_id, title="Target")
+        source = LearningUnit(workspace_id=workspace_id, title="Source")
+        db.add_all([target, source])
+        db.flush()
+        target_point = KnowledgePoint(
+            workspace_id=workspace_id,
+            learning_unit_id=target.id,
+            name="Equations",
+            normalized_name="equations",
+        )
+        db.add(target_point)
+        db.flush()
+        point = KnowledgePoint(
+            workspace_id=workspace_id,
+            learning_unit_id=source.id,
+            name="Fractions",
+            normalized_name="fractions",
+        )
+        db.add(point)
+        db.flush()
+        attempt = KnowledgePointAttempt(
+            workspace_id=workspace_id,
+            learning_unit_id=source.id,
+            knowledge_point_id=point.id,
+            outcome="incorrect",
+            score_ratio=0.0,
+        )
+        mistake = Mistake(
+            workspace_id=workspace_id,
+            knowledge_point_id=point.id,
+            description="Wrong fraction",
+            metadata_={"learning_unit_id": source.id},
+        )
+        stray_attempt = KnowledgePointAttempt(
+            workspace_id=workspace_id,
+            learning_unit_id=source.id,
+            knowledge_point_id=target_point.id,
+            outcome="partial",
+            score_ratio=0.5,
+        )
+        stray_mistake = Mistake(
+            workspace_id=workspace_id,
+            knowledge_point_id=target_point.id,
+            description="Stale unit metadata",
+            metadata_={"learning_unit_id": source.id},
+        )
+        homework = Homework(
+            workspace_id=workspace_id,
+            title="Fraction homework",
+            created_by_user_id=owner_id,
+            metadata_={"learning_unit_id": source.id},
+        )
+        db.add_all([attempt, mistake, stray_attempt, stray_mistake, homework])
+        db.flush()
+
+        service = LearningUnitMergeService(db, fake_storage)
+        service._merge_knowledge_points(workspace_id, target.id, [source.id])
+        service._retarget_homeworks(workspace_id, target.id, [target.id, source.id], [])
+        db.flush()
+
+        assert point.learning_unit_id == target.id
+        assert attempt.learning_unit_id == target.id
+        assert stray_attempt.learning_unit_id == target.id
+        assert mistake.metadata_["learning_unit_id"] == target.id
+        assert stray_mistake.metadata_["learning_unit_id"] == target.id
+        assert homework.metadata_["learning_unit_id"] == target.id
+
 def test_merge_status_closes_after_last_related_task(db_sessionmaker):
     from notepatch.modules.learning.models.learning import LearningUnitDocument
     from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
@@ -252,6 +329,69 @@ def test_merge_status_closes_after_last_related_task(db_sessionmaker):
         db.refresh(unit)
         assert unit.merge_status == "completed"
 
+
+
+def test_merge_status_recovers_when_recorded_failure_retry_succeeds(db_sessionmaker):
+    from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
+
+    with db_sessionmaker() as db:
+        workspace_id = "workspace-merge-retry"
+        failed_task_id = "failed-note-task"
+        unit = LearningUnit(
+            workspace_id=workspace_id,
+            title="Merged",
+            merge_status="failed",
+            metadata_={"merge_failed_task_id": failed_task_id, "merge_failed_task_type": "generate_study_notes"},
+        )
+        db.add(unit)
+        db.flush()
+        retry = Task(
+            workspace_id=workspace_id,
+            task_type="generate_study_notes",
+            status="succeeded",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id, "retry_of_task_id": failed_task_id},
+        )
+        db.add_all([unit, retry])
+        db.commit()
+
+        reconcile_learning_unit_merge(db, retry)
+        db.refresh(unit)
+
+        assert unit.merge_status == "completed"
+        assert "merge_failed_task_id" not in unit.metadata_
+        assert unit.metadata_["merge_completed_by_task_id"] == retry.id
+
+
+def test_merge_status_does_not_recover_for_unrelated_success(db_sessionmaker):
+    from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge
+
+    with db_sessionmaker() as db:
+        workspace_id = "workspace-merge-unrelated"
+        unit = LearningUnit(
+            workspace_id=workspace_id,
+            title="Merged",
+            merge_status="failed",
+            metadata_={"merge_failed_task_id": "expected-retry-target"},
+        )
+        db.add(unit)
+        db.flush()
+        unrelated = Task(
+            workspace_id=workspace_id,
+            task_type="generate_study_notes",
+            status="succeeded",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id},
+        )
+        db.add_all([unit, unrelated])
+        db.commit()
+
+        reconcile_learning_unit_merge(db, unrelated)
+        db.refresh(unit)
+
+        assert unit.merge_status == "failed"
 
 def test_merge_status_fails_with_related_terminal_failure(db_sessionmaker):
     from notepatch.modules.learning.services.merge import reconcile_learning_unit_merge

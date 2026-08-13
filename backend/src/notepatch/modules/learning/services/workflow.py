@@ -252,6 +252,7 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
             task.workspace_id, document.id, artifact_id, artifact_type, extension
         )
         self.storage.put_json_artifact(key, payload, bucket=document.bucket)
+        file_size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         self._ensure_active(task)
         artifact = DocumentArtifact(
             id=artifact_id,
@@ -261,6 +262,7 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
             bucket=document.bucket,
             object_key=key,
             mime_type="application/json",
+            file_size=file_size,
             metadata_={**metadata, "task_id": task.id},
         )
         self.db.add(artifact)

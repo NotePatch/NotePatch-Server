@@ -35,6 +35,17 @@ LEARNING_TASK_TYPES = {
     "highlight_study_notes",
 }
 
+REGISTERED_TASK_TYPES = {
+    "scan_document",
+    "document_processing_pipeline",
+    "ocr_document",
+    *LEARNING_TASK_TYPES,
+    "merge_learning_units",
+    "purge_document",
+    "purge_user",
+    "openclaw_agent_run",
+}
+
 
 @dataclass(slots=True)
 class TaskExecutionContext:

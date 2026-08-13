@@ -114,6 +114,7 @@ OPENCLAW_GATEWAY_TOKEN=
 OPENCLAW_GATEWAY_MODEL=openclaw
 OPENCLAW_AGENT_MODEL=openai/gpt-5.4
 OPENCLAW_GATEWAY_TIMEOUT_SECONDS=120
+OPENCLAW_SKILL_TIMEOUT_SECONDS=300
 OPENCLAW_GATEWAY_READY_TIMEOUT_SECONDS=30
 OPENCLAW_GATEWAY_READY_POLL_SECONDS=2
 OPENCLAW_GATEWAY_SCOPES=operator.write
@@ -556,7 +557,7 @@ docker compose exec api python /opt/notepatch/scripts/cleanup_invalid_documents.
 workspaces/{workspace_id}/sandbox/tasks/{task_id}/output/...
 ```
 
-如果该用户刚上线但 gateway 还在启动，runner 会先轮询 `/healthz` 等待 ready。若 gateway 未能启动、token 不正确、provider key 缺失、返回非 2xx 或 skill 输出不符合 schema，任务会按指数退避最多重试 3 次，错误与 attempt 都写入 task events。用户离线超过 10 分钟后 supervisor 会停止 gateway；只要仍有 queued/running 的聊天、切题、知识库、笔记、批改、高亮或闪卡任务，supervisor 就会启动并保活对应容器。
+如果该用户刚上线但 gateway 还在启动，runner 会先轮询 `/healthz` 等待 ready。聊天请求使用 `OPENCLAW_GATEWAY_TIMEOUT_SECONDS`，较长的学习 Skill 使用独立的 `OPENCLAW_SKILL_TIMEOUT_SECONDS`（默认 300 秒）；同一任务重试时会复用已落盘且通过 schema 校验的迟到输出。若 gateway 未能启动、token 不正确、provider key 缺失、返回非 2xx 或 skill 输出不符合 schema，任务会按指数退避最多重试 3 次，错误与 attempt 都写入 task events。用户离线超过 10 分钟后 supervisor 会停止 gateway；只要仍有 queued/running 的聊天、切题、知识库、笔记、批改、高亮或闪卡任务，supervisor 就会启动并保活对应容器。
 
 生产环境只提供 Gateway runner。单元测试通过依赖注入使用 `tests/fakes.py`，不会在生产代码中生成替代结果。
 
@@ -595,10 +596,10 @@ DOCTR_ENABLED=false
 
 - `default` queue 使用 Redis key `notepatch:tasks`，普通 `worker` 默认只消费它。
 - `ocr` queue 使用 Redis key `notepatch:tasks:ocr`，GPU `ocr-worker` 只消费它。
-- `chat` queue 使用 Redis key `notepatch:tasks:chat`，常驻 `chat-worker` 独立消费交互式 OpenClaw 对话，避免被耗时学习任务阻塞。
-- `ocr_document` 和 `document_processing_pipeline` 都进入 `ocr` queue，普通 worker 不会加载 PaddleOCR。
-- `openclaw_agent_run` 进入 `chat` queue。
-- `extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 进入 `default` queue。
+- `chat` queue 使用 Redis key `notepatch:tasks:chat`，常驻 `chat-worker` 消费所有 OpenClaw-backed 任务，避免扫描、purge 等 default 任务被长时间 AI 调用阻塞。
+- `ocr_document` 和 `document_processing_pipeline` 都进入 `ocr` queue，普通 worker 不会加载 PaddleOCR；同一 OCR worker 进程会复用已加载模型。
+- `openclaw_agent_run`、`extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 都进入 `chat` queue。
+- `scan_document`、purge、merge 等非模型编排任务继续进入 `default` queue。
 - 可恢复错误进入 Redis delayed-retry zset，按指数退避重新投递；不会阻塞 worker loop。
 
 worker 可用 CLI 或 env 指定队列：

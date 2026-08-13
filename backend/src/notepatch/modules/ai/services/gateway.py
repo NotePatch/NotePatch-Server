@@ -82,12 +82,14 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         request_body = self._build_request_body(payload)
         provider_model = self._provider_model(payload)
         session_key = runtime.get("session_key") if isinstance(runtime.get("session_key"), str) else None
+        timeout_seconds = self._request_timeout_seconds(runtime)
         response_json = self._post_chat_completion(
             request_body,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             session_key=session_key,
             provider_model=provider_model,
+            timeout_seconds=timeout_seconds,
         )
         answer = self._extract_answer(response_json)
         self._raise_embedded_gateway_error(answer)
@@ -221,6 +223,7 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         gateway_token: str | None = None,
         session_key: str | None = None,
         provider_model: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict:
         base_url = (gateway_url or self.base_url).rstrip("/")
         self._wait_until_ready(base_url)
@@ -230,6 +233,7 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
                 url,
                 headers=self._headers(gateway_token, session_key, provider_model),
                 json=request_body,
+                timeout=timeout_seconds or self.settings.openclaw_gateway_timeout_seconds,
             )
         except httpx.TimeoutException as exc:
             raise OpenClawRunnerError(f"OpenClaw gateway request timed out: {url}") from exc
@@ -247,6 +251,12 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         if not isinstance(parsed, dict):
             raise OpenClawRunnerError("OpenClaw gateway returned an invalid JSON response")
         return parsed
+
+    def _request_timeout_seconds(self, runtime: dict) -> float:
+        value = runtime.get("timeout_seconds")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value)
+        return float(self.settings.openclaw_gateway_timeout_seconds)
 
     def _wait_until_ready(self, gateway_url: str) -> None:
         timeout = self.settings.openclaw_gateway_ready_timeout_seconds

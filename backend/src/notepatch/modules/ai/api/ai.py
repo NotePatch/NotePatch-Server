@@ -11,6 +11,7 @@ from notepatch.entrypoints.deps import (
 from notepatch.platform.database import get_db
 from notepatch.modules.identity.services.permissions import require_member_permission
 from notepatch.modules.documents.models.document import Document
+from notepatch.modules.learning.models.learning import LearningUnit, LearningUnitDocument, StudyNoteVersion
 from notepatch.modules.ai.models.chat import ChatConversation
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.identity.models.user import User
@@ -225,6 +226,17 @@ def generate_flashcards(
     task_service: TaskService = Depends(get_task_service),
 ) -> Task:
     require_member_permission(db, member, "ai.run")
+    unit: LearningUnit | None = None
+    if payload.learning_unit_id is not None:
+        unit = db.scalar(
+            select(LearningUnit).where(
+                LearningUnit.workspace_id == workspace_id,
+                LearningUnit.id == payload.learning_unit_id,
+                LearningUnit.merged_into_id.is_(None),
+            )
+        )
+        if unit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning unit not found")
     if payload.document_id is not None:
         document = db.scalar(
             select(Document).where(
@@ -235,10 +247,68 @@ def generate_flashcards(
         )
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        link = db.scalar(
+            select(LearningUnitDocument).where(
+                LearningUnitDocument.workspace_id == workspace_id,
+                LearningUnitDocument.document_id == document.id,
+            )
+        )
+        if link is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document has no learning unit")
+        document_unit = db.scalar(
+            select(LearningUnit).where(
+                LearningUnit.workspace_id == workspace_id,
+                LearningUnit.id == link.learning_unit_id,
+                LearningUnit.merged_into_id.is_(None),
+            )
+        )
+        if document_unit is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document learning unit is unavailable")
+        if unit is not None and unit.id != document_unit.id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="document_id does not belong to learning_unit_id",
+            )
+        unit = document_unit
+    if unit is None and payload.subject is not None:
+        matches = db.scalars(
+            select(LearningUnit).where(
+                LearningUnit.workspace_id == workspace_id,
+                LearningUnit.subject == payload.subject,
+                LearningUnit.merged_into_id.is_(None),
+            )
+        ).all()
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Subject matches multiple learning units; provide learning_unit_id",
+            )
+        unit = matches[0] if matches else None
+    if unit is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="learning_unit_id or a linked document_id is required",
+        )
+    note = db.scalar(
+        select(StudyNoteVersion)
+        .where(
+            StudyNoteVersion.workspace_id == workspace_id,
+            StudyNoteVersion.learning_unit_id == unit.id,
+        )
+        .order_by(StudyNoteVersion.version_no.desc())
+    )
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Learning unit has no study note")
     return task_service.create_task(
         workspace_id=workspace_id,
         task_type="generate_flashcards",
-        resource_type="document" if payload.document_id else None,
-        resource_id=payload.document_id,
-        payload={"document_id": payload.document_id, "subject": payload.subject, "options": payload.options},
+        resource_type="learning_unit",
+        resource_id=unit.id,
+        payload={
+            "learning_unit_id": unit.id,
+            "study_note_version_id": note.id,
+            "expected_attempt_revision": unit.attempt_revision,
+            "reason": "manual_ai_endpoint",
+            "options": payload.options,
+        },
     )

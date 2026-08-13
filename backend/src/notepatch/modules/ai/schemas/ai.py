@@ -84,6 +84,7 @@ class AiModelSelectionRead(BaseModel):
 
 
 class GenerateFlashcardsRequest(BaseModel):
+    learning_unit_id: str | None = None
     document_id: str | None = None
     subject: str | None = None
     options: dict = Field(default_factory=dict)

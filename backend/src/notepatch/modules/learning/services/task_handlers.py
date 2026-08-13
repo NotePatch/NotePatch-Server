@@ -42,7 +42,7 @@ def run_learning_task(
         event_type, callback = selected
 
     tasks.ensure_active(task)
-    tasks.add_event(task, f"{event_type}_started", f"OpenClaw {event_type} skill started", progress=35)
+    tasks.add_event(task, f"{event_type}_started", f"{event_type.replace('_', ' ').title()} task started", progress=35)
     tasks.db.commit()
     result = callback()
     tasks.ensure_active(task)

@@ -3,6 +3,17 @@ from __future__ import annotations
 from notepatch.platform.config import Settings
 
 
+OPENCLAW_BACKED_TASK_TYPES = {
+    "openclaw_agent_run",
+    "extract_questions",
+    "build_knowledge_base",
+    "generate_study_notes",
+    "generate_flashcards",
+    "grade_homework",
+    "highlight_study_notes",
+}
+
+
 def parse_queue_names(value: str | None, *, default: str) -> list[str]:
     names: list[str] = []
     for item in (value or default).split(","):
@@ -15,7 +26,7 @@ def parse_queue_names(value: str | None, *, default: str) -> list[str]:
 def queue_name_for_task_type(settings: Settings, task_type: str) -> str:
     if task_type in {"ocr_document", "document_processing_pipeline"}:
         return settings.ocr_queue_name
-    if task_type == "openclaw_agent_run":
+    if task_type in OPENCLAW_BACKED_TASK_TYPES:
         return settings.chat_queue_name
     return settings.default_queue_name
 

@@ -1,0 +1,11 @@
+id	title	status	max_score	unit_id	references	grading_results
+10d09d86-52c7-485c-ac25-f48b4c2690cc	math_homework	graded	20	0b796416-b4da-43f3-855f-700cfcd4c8c8	1	3
+(1 row)
+id	homework_id	score	max_score	grading_mode	confidence	created_at
+386b9989-5e84-4a3b-8e0a-3c05a61198cf	10d09d86-52c7-485c-ac25-f48b4c2690cc	61	100	provisional	0.48	2026-08-13 12:15:54.399978+00
+f3051c37-0de8-4eb1-b67d-c6cbe98b3369	10d09d86-52c7-485c-ac25-f48b4c2690cc	13	20	official	0.72	2026-08-13 12:34:17.255746+00
+485ac7d6-7c15-4501-9af0-5d0ba0f820bc	10d09d86-52c7-485c-ac25-f48b4c2690cc	12	20	official	0.55	2026-08-13 12:41:18.493632+00
+(3 rows)
+?column?	count	count
+mistakes	17	17
+(1 row)

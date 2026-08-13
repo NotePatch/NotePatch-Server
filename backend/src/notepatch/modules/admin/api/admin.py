@@ -446,12 +446,15 @@ def get_task_events(
 ) -> list[AdminTaskEventRead]:
     if db.get(Task, task_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    events = db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at.asc())).all()
+    events = db.scalars(
+        select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.sequence_no.asc())
+    ).all()
     return [
         AdminTaskEventRead(
             id=event.id,
             task_id=event.task_id,
             workspace_id=event.workspace_id,
+            sequence_no=event.sequence_no,
             event_type=event.event_type,
             level=event.level,
             message=event.message,

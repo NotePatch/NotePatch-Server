@@ -174,6 +174,13 @@ class FakeSkillRunner:
                         "source_refs": [],
                         "difficulty": "medium",
                     }
+                    ,{
+                        "knowledge_point_id": point["id"],
+                        "front": "How can you recognize a linear function?",
+                        "back": "Its rate of change remains constant.",
+                        "source_refs": [],
+                        "difficulty": "medium",
+                    }
                 ]
             }
         else:

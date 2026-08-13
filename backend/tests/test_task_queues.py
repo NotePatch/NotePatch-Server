@@ -1,8 +1,11 @@
+from datetime import timedelta
 from notepatch.platform.config import get_settings
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.tasks.services.queue import promote_due_retries, redis_key_for_queue, retry_key_for_queue
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.modules.tasks.services.executor import process_task
+from notepatch.modules.tasks.services.task_lease import TaskLease, recover_orphaned_tasks, task_lease_key
+from notepatch.platform.database import utcnow
 from notepatch.entrypoints.worker import redis_keys_for_worker_queues, queue_names_from_args
 from tests.conftest import FakeRedis, auth_headers, first_workspace_id, register_user
 from tests.test_doctr_worker import PNG_BYTES
@@ -52,16 +55,19 @@ def test_ocr_document_task_routes_to_ocr_queue(client, db_sessionmaker, monkeypa
     assert event.data["redis_key"] == "notepatch:tasks:ocr"
 
 
-def test_non_ocr_tasks_route_to_default_queue(client, db_sessionmaker, monkeypatch):
+def test_openclaw_backed_learning_tasks_route_to_chat_queue(client, db_sessionmaker, monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr("notepatch.modules.tasks.services.task.redis.from_url", lambda *args, **kwargs: fake_redis)
-    user = register_user(client, "queue-default-route@example.com")
+    user = register_user(client, "queue-learning-ai-route@example.com")
     workspace_id = first_workspace_id(client, user["access_token"])
 
     task_types = [
-        "grade_homework",
+        "extract_questions",
         "build_knowledge_base",
+        "generate_study_notes",
         "generate_flashcards",
+        "grade_homework",
+        "highlight_study_notes",
     ]
     with db_sessionmaker() as db:
         task_ids = [
@@ -71,7 +77,19 @@ def test_non_ocr_tasks_route_to_default_queue(client, db_sessionmaker, monkeypat
             for task_type in task_types
         ]
 
-    assert fake_redis.lists == {"notepatch:tasks": task_ids}
+    assert fake_redis.lists == {"notepatch:tasks:chat": task_ids}
+
+
+def test_control_tasks_stay_on_default_queue(client, db_sessionmaker, monkeypatch):
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("notepatch.modules.tasks.services.task.redis.from_url", lambda *args, **kwargs: fake_redis)
+    user = register_user(client, "queue-default-route@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    with db_sessionmaker() as db:
+        task = TaskService(db).create_task(
+            workspace_id=workspace_id, task_type="scan_document", payload={}
+        )
+    assert fake_redis.lists == {"notepatch:tasks": [task.id]}
 
 
 def test_openclaw_chat_task_routes_to_chat_queue(client, db_sessionmaker, monkeypatch):
@@ -258,3 +276,97 @@ def test_success_after_retry_clears_previous_error(client, db_sessionmaker):
         db.refresh(task)
         assert task.status == "succeeded"
         assert task.error_message is None
+
+
+def test_worker_task_lease_prevents_duplicate_execution():
+    fake_redis = FakeRedis()
+    with TaskLease(fake_redis, "leased-task") as first:
+        assert first.acquired is True
+        with TaskLease(fake_redis, "leased-task") as duplicate:
+            assert duplicate.acquired is False
+    assert task_lease_key("leased-task") not in fake_redis.values
+
+
+def test_orphaned_running_task_is_requeued(client, db_sessionmaker):
+    settings = get_settings()
+    old_grace = settings.task_orphan_recovery_grace_seconds
+    settings.task_orphan_recovery_grace_seconds = 30
+    fake_redis = FakeRedis()
+    user = register_user(client, "orphan-requeue@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    try:
+        with db_sessionmaker() as db:
+            task, _ = TaskService(db).create_task_record(
+                workspace_id=workspace_id,
+                task_type="generate_flashcards",
+                payload={},
+            )
+            task.status = "running"
+            task.attempt = 1
+            task.started_at = utcnow() - timedelta(seconds=60)
+            db.commit()
+
+            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 1
+            db.refresh(task)
+            assert task.status == "queued"
+            assert task.attempt == 1
+            assert fake_redis.lists["notepatch:tasks:chat"] == [task.id]
+            event = db.query(TaskEvent).filter_by(task_id=task.id, event_type="orphan_requeued").one()
+            assert event.data["attempt"] == 1
+    finally:
+        settings.task_orphan_recovery_grace_seconds = old_grace
+
+
+def test_running_task_with_live_lease_is_not_requeued(client, db_sessionmaker):
+    settings = get_settings()
+    old_grace = settings.task_orphan_recovery_grace_seconds
+    settings.task_orphan_recovery_grace_seconds = 1
+    fake_redis = FakeRedis()
+    user = register_user(client, "orphan-live-lease@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    try:
+        with db_sessionmaker() as db:
+            task, _ = TaskService(db).create_task_record(
+                workspace_id=workspace_id,
+                task_type="generate_study_notes",
+                payload={},
+            )
+            task.status = "running"
+            task.attempt = 1
+            task.started_at = utcnow() - timedelta(seconds=60)
+            db.commit()
+            fake_redis.set(task_lease_key(task.id), "worker", ex=60)
+
+            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 0
+            db.refresh(task)
+            assert task.status == "running"
+    finally:
+        settings.task_orphan_recovery_grace_seconds = old_grace
+
+
+def test_orphaned_task_at_attempt_limit_fails(client, db_sessionmaker):
+    settings = get_settings()
+    old_grace = settings.task_orphan_recovery_grace_seconds
+    settings.task_orphan_recovery_grace_seconds = 1
+    fake_redis = FakeRedis()
+    user = register_user(client, "orphan-exhausted@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    try:
+        with db_sessionmaker() as db:
+            task, _ = TaskService(db).create_task_record(
+                workspace_id=workspace_id,
+                task_type="generate_flashcards",
+                payload={},
+                max_attempts=1,
+            )
+            task.status = "running"
+            task.attempt = 1
+            task.started_at = utcnow() - timedelta(seconds=60)
+            db.commit()
+
+            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 1
+            db.refresh(task)
+            assert task.status == "failed"
+            assert "attempt limit" in task.error_message
+    finally:
+        settings.task_orphan_recovery_grace_seconds = old_grace

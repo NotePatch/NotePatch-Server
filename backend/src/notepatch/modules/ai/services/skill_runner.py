@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from notepatch.modules.tasks.models.task import Task
+from notepatch.platform.config import get_settings
 from notepatch.platform.errors import RetryableTaskError
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunner
 from notepatch.modules.ai.services.model_selection import AiModelSelectionService
@@ -36,6 +37,7 @@ class OpenClawSkillRunner:
         self.storage = storage
         self.gateway_runner = gateway_runner
         self.runtime = runtime_service or OpenClawUserRuntimeService()
+        self.settings = get_settings()
 
     def execute(
         self,
@@ -105,8 +107,6 @@ class OpenClawSkillRunner:
             metadata={"task_id": task.id, "skill": skill_name},
         )
         tasks.ensure_active(task)
-        output_path.unlink(missing_ok=True)
-
         session_key = f"notepatch:{task.workspace_id}:{task.id}"
         request = self._request_payload(
             task=task,
@@ -115,25 +115,45 @@ class OpenClawSkillRunner:
             output_filename=output_filename,
             session_key=session_key,
             provider_model=provider_model,
+            timeout_seconds=self.settings.openclaw_skill_timeout_seconds,
         )
-        self.gateway_runner.prepare_task_dir(task.workspace_id, task.id)
-        run_result = self.gateway_runner.run_task(task.workspace_id, task.id, request)
-        tasks.ensure_active(task)
-        try:
-            parsed = self._validate_output(output_path, schema)
-        except OpenClawSkillOutputError as first_error:
+        parsed = None
+        run_result = None
+        if (task.attempt or 0) > 1 and output_path.is_file():
+            try:
+                parsed = self._validate_output(output_path, schema)
+                run_result = {"runner": "gateway", "reused_output": True}
+                tasks.add_event(
+                    task,
+                    "skill_output_reused",
+                    "Reused schema-valid output from a previous task attempt",
+                    data={"skill": skill_name, "output_filename": output_filename},
+                )
+                self.db.commit()
+            except OpenClawSkillOutputError:
+                output_path.unlink(missing_ok=True)
+        else:
             output_path.unlink(missing_ok=True)
-            correction = dict(request)
-            correction["prompt"] = (
-                f"The previous {skill_name} output was invalid: {first_error}. "
-                "Correct it now. Read input.json, then use the json_schema property inside its "
-                "_output_contract object; remove all "
-                "additional properties, include every required property, and write only schema-valid JSON to "
-                f"{runtime['task_output_path']}/{output_filename}. Do not merely return JSON in chat."
-            )
-            run_result = self.gateway_runner.run_task(task.workspace_id, task.id, correction)
+
+        if parsed is None:
+            self.gateway_runner.prepare_task_dir(task.workspace_id, task.id)
+            run_result = self.gateway_runner.run_task(task.workspace_id, task.id, request)
             tasks.ensure_active(task)
-            parsed = self._validate_output(output_path, schema)
+            try:
+                parsed = self._validate_output(output_path, schema)
+            except OpenClawSkillOutputError as first_error:
+                output_path.unlink(missing_ok=True)
+                correction = dict(request)
+                correction["prompt"] = (
+                    f"The previous {skill_name} output was invalid: {first_error}. "
+                    "Correct it now. Read input.json, then use the json_schema property inside its "
+                    "_output_contract object; remove all "
+                    "additional properties, include every required property, and write only schema-valid JSON to "
+                    f"{runtime['task_output_path']}/{output_filename}. Do not merely return JSON in chat."
+                )
+                run_result = self.gateway_runner.run_task(task.workspace_id, task.id, correction)
+                tasks.ensure_active(task)
+                parsed = self._validate_output(output_path, schema)
 
         tasks.ensure_active(task)
         output_key = self.storage.sandbox_output_key(task.workspace_id, task.id, output_filename)
@@ -175,6 +195,7 @@ class OpenClawSkillRunner:
         output_filename: str,
         session_key: str,
         provider_model: str,
+        timeout_seconds: float,
     ) -> dict:
         return {
             "prompt": (
@@ -196,5 +217,6 @@ class OpenClawSkillRunner:
                 "task_output_path": runtime["task_output_path"],
                 "host_task_output_dir": runtime["host_task_output_dir"],
                 "session_key": session_key,
+                "timeout_seconds": timeout_seconds,
             },
         }

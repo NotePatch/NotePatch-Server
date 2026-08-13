@@ -1,6 +1,7 @@
 from sqlalchemy import select
 
 from notepatch.platform.config import get_settings
+from notepatch.modules.documents.models.document import DocumentArtifact
 from notepatch.modules.learning.models.homework import GradingResult, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
@@ -12,6 +13,7 @@ from notepatch.modules.learning.models.learning import (
 )
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.executor import process_task
+from notepatch.modules.tasks.services.task import TaskService
 from tests.conftest import auth_headers, first_workspace_id, register_user
 from tests.test_doctr_worker import FailingDocTrClient, PNG_BYTES
 
@@ -105,6 +107,15 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
 
             learning_unit = db.scalar(select(LearningUnit).where(LearningUnit.workspace_id == workspace_id))
             assert learning_unit is not None
+            db.add(
+                Mistake(
+                    workspace_id=workspace_id,
+                    description="Review factoring",
+                    status="open",
+                    metadata_={"learning_unit_id": learning_unit.id},
+                )
+            )
+            db.commit()
             notes_task = _latest_task(db, workspace_id, "generate_study_notes", learning_unit.id)
             process_task(db, notes_task.id, storage=fake_storage)
 
@@ -113,10 +124,15 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
             assert note.html_object_key in {key[1] for key in fake_storage.objects}
             assert note.json_object_key in {key[1] for key in fake_storage.objects}
             flashcard_task = _latest_task(db, workspace_id, "generate_flashcards", learning_unit.id)
+            highlight_task = _latest_task(db, workspace_id, "highlight_study_notes", learning_unit.id)
+            assert highlight_task.status == "queued"
+            assert highlight_task.payload["expected_note_version_id"] == note.id
             process_task(db, flashcard_task.id, storage=fake_storage)
             deck = db.scalar(select(FlashcardDeck).where(FlashcardDeck.learning_unit_id == learning_unit.id))
             assert deck is not None
-            assert db.scalar(select(Flashcard).where(Flashcard.deck_id == deck.id)) is not None
+            cards = db.scalars(select(Flashcard).where(Flashcard.deck_id == deck.id)).all()
+            assert len(cards) == 2
+            assert cards[0].knowledge_point_id == cards[1].knowledge_point_id
 
         units = client.get(f"/api/v1/workspaces/{workspace_id}/learning-units", headers=auth_headers(user["access_token"]))
         assert units.status_code == 200, units.text
@@ -131,6 +147,57 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
     finally:
         settings.auto_learning_pipeline = old_auto
 
+
+
+def test_force_knowledge_reprocess_replaces_document_chunks(client, db_sessionmaker, fake_storage):
+    settings, old_auto = _set_auto_learning(True)
+    try:
+        user = register_user(client, "learning-force-kb@example.com")
+        workspace_id = first_workspace_id(client, user["access_token"])
+        upload = _create_and_complete_document(
+            client,
+            fake_storage,
+            user["access_token"],
+            workspace_id,
+            filename="force-kb.png",
+            document_kind="courseware",
+        )
+        document_id = upload["document"]["id"]
+        with db_sessionmaker() as db:
+            process_task(
+                db,
+                _latest_task(db, workspace_id, "document_processing_pipeline", document_id).id,
+                storage=fake_storage,
+                doctr_client=FailingDocTrClient(),
+            )
+            first = _latest_task(db, workspace_id, "build_knowledge_base", document_id)
+            process_task(db, first.id, storage=fake_storage)
+            first_chunk_ids = set(
+                db.scalars(select(KnowledgeChunk.id).where(KnowledgeChunk.document_id == document_id)).all()
+            )
+            assert first_chunk_ids
+            replacement = TaskService(db).create_task(
+                workspace_id=workspace_id,
+                task_type="build_knowledge_base",
+                resource_type="document",
+                resource_id=document_id,
+                payload={
+                    "document_id": document_id,
+                    "learning_unit_id": first.payload["learning_unit_id"],
+                    "source_ocr_run_id": first.payload.get("source_ocr_run_id"),
+                    "force_reprocess": True,
+                },
+                enqueue=False,
+            )
+            process_task(db, replacement.id, storage=fake_storage)
+            current_chunk_ids = set(
+                db.scalars(select(KnowledgeChunk.id).where(KnowledgeChunk.document_id == document_id)).all()
+            )
+            assert current_chunk_ids
+            assert current_chunk_ids.isdisjoint(first_chunk_ids)
+            assert len(current_chunk_ids) == len(first_chunk_ids)
+    finally:
+        settings.auto_learning_pipeline = old_auto
 
 def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, db_sessionmaker, fake_storage):
     settings, old_auto = _set_auto_learning(True)
@@ -170,6 +237,15 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
             process_task(db, _latest_task(db, workspace_id, "document_processing_pipeline", homework_document_id).id, storage=fake_storage, doctr_client=FailingDocTrClient())
             extract_task = _latest_task(db, workspace_id, "extract_questions", homework_document_id)
             process_task(db, extract_task.id, storage=fake_storage)
+            questions_artifact = db.scalar(
+                select(DocumentArtifact).where(
+                    DocumentArtifact.workspace_id == workspace_id,
+                    DocumentArtifact.document_id == homework_document_id,
+                    DocumentArtifact.artifact_type == "questions_json",
+                )
+            )
+            assert questions_artifact is not None
+            assert questions_artifact.file_size > 0
             grade_task = _latest_task(db, workspace_id, "grade_homework")
             process_task(db, grade_task.id, storage=fake_storage)
             grading = db.scalar(select(GradingResult).where(GradingResult.workspace_id == workspace_id))

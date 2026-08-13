@@ -72,6 +72,7 @@ class ChatService:
                 "conversation_id": conversation.id,
                 "user_message_id": user_message.id,
                 "assistant_message_id": assistant_message.id,
+                "ai_history_enabled": bool(user.ai_history_enabled),
             },
             enqueue=False,
         )
@@ -163,9 +164,14 @@ class ChatService:
         )
         if conversation is None:
             return []
-        user = self.db.get(User, conversation.user_id)
-        if user is None or not user.ai_history_enabled:
-            return []
+        history_enabled = task.payload.get("ai_history_enabled")
+        if isinstance(history_enabled, bool):
+            if not history_enabled:
+                return []
+        else:
+            user = self.db.get(User, conversation.user_id)
+            if user is None or not user.ai_history_enabled:
+                return []
         messages = self.db.scalars(
             select(ChatMessage)
             .where(

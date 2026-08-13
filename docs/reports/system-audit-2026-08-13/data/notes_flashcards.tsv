@@ -1,0 +1,10 @@
+id	learning_unit_id	version_no	title	edit_origin	points	documents	mistakes	highlighted	created_at
+14251625-d661-4d8f-b24b-ac06b9e7d465	0b796416-b4da-43f3-855f-700cfcd4c8c8	1	Cambridge IGCSE First Language English Standards Booklet	skill	1	1	0	f	2026-08-13 13:01:20.095311+00
+7965ec45-8cb2-4a2a-9ac7-815224b825fb	0b796416-b4da-43f3-855f-700cfcd4c8c8	2	IGCSE Study Notes from image_note	skill	11	2	17	t	2026-08-13 13:17:29.175983+00
+f9dab821-99c6-496b-80f1-5714c6abbe3e	4fab8a47-5f46-4fce-8261-237a408a7405	1	Quadratic Equation Example	skill	1	1	0	f	2026-08-13 12:28:05.058668+00
+c3d1e613-03b7-4603-a85e-c2eda2d6d950	bfa2906d-b1b9-4115-a615-b96fa2e46e7d	1	Mass-Energy Equivalence	skill	1	1	0	f	2026-08-13 12:23:42.063909+00
+(4 rows)
+id	learning_unit_id	version_no	attempt_revision	cards	min_priority	max_priority
+0284cd36-1cfb-4c87-a379-050079fa35e7	0b796416-b4da-43f3-855f-700cfcd4c8c8	1	0	3	1.000	1.000
+10a5f795-e798-4701-b98e-51a4f9355eca	0b796416-b4da-43f3-855f-700cfcd4c8c8	2	3	13	1.000	5.995
+(2 rows)

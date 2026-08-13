@@ -33,8 +33,9 @@ Backend internal
   -> PostgreSQL: metadata, task status, workspace isolation
   -> SeaweedFS S3: original files and artifacts
   -> Redis: task queues and online presence
-  -> worker(default): OpenClaw、grading、knowledge、notes 与 purge tasks
+  -> worker(default): scan、purge、merge 等短编排任务
   -> ocr-worker(ocr profile): document_processing_pipeline、ocr_document 与真实 PaddleOCR
+  -> chat-worker(chat): chat、题目提取、知识库、笔记、批改、高亮与闪卡
   -> docserver: DocTr image rectification, internal only
   -> OpenClaw per-user gateway: internal only
 ```
@@ -468,7 +469,16 @@ GET  /workspaces/{workspace_id}/tasks/{task_id}
 GET  /workspaces/{workspace_id}/tasks/{task_id}/events
 ```
 
-当前任务进度用轮询。后续可以加 SSE/WebSocket。
+轮询接口继续兼容。新客户端建议优先使用 SSE 事件流：
+
+```http
+GET /workspaces/{workspace_id}/tasks/{task_id}/events/stream
+Authorization: Bearer <access_token>
+Last-Event-ID: <last sequence>
+Accept: text/event-stream
+```
+
+需要自定义 `Authorization` 请求头，因此浏览器端应使用基于 `fetch` 的 SSE 客户端。保存最后一个 event ID，断线重连时发送 `Last-Event-ID`，忽略 heartbeat comment，并在收到 `done` 事件后关闭连接。轮询仍可作为不支持 SSE 客户端的 fallback。
 
 ```ts
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -722,7 +732,7 @@ UI 建议：
 
 若笔记长时间未生成，用户端保留“仍在生成/暂不可用”状态；运维端应查看 `generate_study_notes` 的 task events。常见可恢复情况是 gateway 已返回 HTTP 200，但 skill 没有写出必需的 `study_note.json`，worker 会自动重试，最终成功前不要缓存空 notes 列表为永久结果。
 
-后端内部区分 `default`、`ocr` 和 `chat` 三个 worker queue：文档处理进入 `ocr`，学习任务进入 `default`，交互式 OpenClaw 对话进入 `chat`，避免聊天被长任务阻塞。这个拆分不改变前端 API。
+后端内部区分 `default`、`ocr` 和 `chat` 三个 worker queue：文档处理进入 `ocr`，扫描、purge、merge 等编排任务进入 `default`，聊天及题目提取、知识库、笔记、批改、高亮、闪卡等 OpenClaw-backed 任务进入 `chat`。这个拆分不改变前端 API；学习 Skill 默认允许最多 300 秒执行，客户端应持续依据 task/events 展示进度。
 
 `POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口。它创建后端异步 OpenClaw 任务，前端不直接调用 OpenClaw Gateway，也不要启动/停止容器。请求体使用 `{ "prompt": string, "conversation_id"?: string, "input": object, "options": object }`，响应是 `TaskRead`；随后轮询 task 与 events 获取 `task.result.answer` 或失败原因。会话历史由后端保存，是否注入 OpenClaw 由用户全局 `ai_history_enabled` 控制。后端会为每个用户维护独立 OpenClaw gateway 配置和用户数据目录；用户在线时 supervisor 保持 gateway 运行，worker 在任务前把该用户 personal workspace 的文档镜像到 OpenClaw workspace，再把 OpenClaw 输出上传回 SeaweedFS。
 
@@ -788,7 +798,7 @@ type OpenClawTaskResult = {
 
 前端只展示 `answer`、任务状态和必要的 output metadata。不要展示或依赖 `user_workspace_dir` 的本机路径，也不要直接访问 `gateway_container`；这些字段主要用于后端排查。失败时读取 `task.error_message` 和 events 展示原因。
 
-图片文档调用 `process` 后，worker 会先通过内网 DocTr 无状态推理服务生成 `deskewed_image.png` artifact，然后优先用该图片做 OCR；如果 DocTr 失败，后端会写 warning event 并 fallback 到原图。PDF 会在 worker 中渲染后 OCR；DOCX/PPTX 第一版会提示需先转换为 PDF 或图片。前端只需要轮询 task/events，不需要直接调用 DocTr、OCR engine、SeaweedFS 或 OpenClaw。
+图片文档调用 `process` 后，worker 会先通过内网 DocTr 无状态推理服务生成 `deskewed_image.png` artifact，然后优先用该图片做 OCR；如果 DocTr 失败，后端会写 warning event 并 fallback 到原图。PDF 会在 worker 中渲染后 OCR；DOCX/PPTX 会先由内网 LibreOffice converter 转为 `converted_pdf` artifact，再进入同一 PDF OCR 流程。前端只需要轮询 task/events，不需要直接调用 DocTr、converter、OCR engine、SeaweedFS 或 OpenClaw。
 
 图片处理成功时，events 通常包含：
 
@@ -958,10 +968,10 @@ DELETE /workspaces/{workspace_id}/homeworks/{homework_id}/references/{reference_
 前端当前需要明确这些产品边界：
 
 - OCR、layout、table、formula 都依赖 GPU worker 与真实模型；服务不可用时任务会重试并最终明确失败，不返回替代结果。
-- DOCX/PPTX 第一版不会直接 OCR，会失败并提示先转换为 PDF 或图片。
+- DOCX/PPTX 会由内网 LibreOffice converter 转为 `converted_pdf` artifact，再进入 PDF OCR；转换损坏、超时或格式不受支持时任务会明确失败。
 - AI 结果来自 OpenClaw skills，必须通过后端 schema 校验，但不代表结果天然绝对正确。
 - 无答案或 rubric 的评分是 `provisional` 诊断性结果；只有存在评分依据时才显示为 `official`。
-- 任务进度目前是轮询，没有 SSE/WebSocket。
+- 任务进度同时支持 SSE 与轮询；SSE 支持 `Last-Event-ID` 断线续传，旧客户端可继续轮询。
 
 推荐 UI 处理：
 
@@ -992,21 +1002,17 @@ DELETE /workspaces/{workspace_id}/homeworks/{homework_id}/references/{reference_
 - `500`: 展示后端错误摘要，并提示查看 task events；OpenClaw/PaddleOCR/DocTr 失败通常不是前端渲染问题
 
 
-## Production upload, notes, and task events
+## Production Upload And Notes
 
-After tus upload completion, a document may remain in `scanning`. Do not present processing as complete until `scan_status=clean`; `failed` can represent MIME mismatch, malware, size limits, or an unavailable scanner. DOCX/PPTX are converted to PDF by the backend before OCR.
+tus 上传完成后，文档可能暂时处于 `scanning`。只有 `scan_status=clean` 才表示可进入处理；`failed` 可能表示 MIME 不匹配、恶意文件、大小超限或扫描服务不可用。
 
-When no valid `learning_unit_id` is supplied, each uploaded file receives its own learning unit. Merge units asynchronously with `POST /api/v1/workspaces/{workspace_id}/learning-units/{target_id}/merge` and body `{"source_learning_unit_ids":["..."]}`.
-
-Polling remains valid, but new clients may consume:
+未提供有效 `learning_unit_id` 时，每个上传文件会获得独立学习单元。合并学习单元使用：
 
 ```http
-GET /api/v1/workspaces/{workspace_id}/tasks/{task_id}/events/stream
-Authorization: Bearer <access_token>
-Last-Event-ID: <last sequence>
-Accept: text/event-stream
+POST /workspaces/{workspace_id}/learning-units/{target_id}/merge
+{"source_learning_unit_ids":["..."]}
 ```
 
-Use a fetch-based SSE client when an Authorization header is required. Persist the last event ID, reconnect with `Last-Event-ID`, ignore heartbeat comments, and stop after the `done` event.
+接口返回异步 `TaskRead`，客户端按 Task Polling 章节跟踪。
 
-For study-note display, prefer `download_urls.rendered_html` over raw `html` or `highlighted_html`. It is a short-lived signed page containing the current highlighted fragment when available, the versioned NotePatch paper CSS, and a strict CSP. Refresh the URL after expiry. Raw fragments remain available for trusted editors; do not add client-side styles or execute embedded content.
+展示学习笔记时，优先使用 `download_urls.rendered_html`，不要优先渲染原始 `html` 或 `highlighted_html`。该短期签名页面会选择可用的最新高亮 fragment，加载版本化 NotePatch paper CSS，并设置严格 CSP；过期后重新请求 URL。原始 HTML fragment 只供可信编辑器使用，客户端不要追加任意样式或执行其中内容。

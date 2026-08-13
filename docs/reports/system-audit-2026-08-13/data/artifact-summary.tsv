@@ -1,0 +1,12 @@
+artifact_type	versions	bytes
+converted_pdf	3	54505
+deskewed_image	5	9956510
+formula_json	12	216
+layout_json	12	63422
+ocr_json	12	99804
+ocr_markdown	12	12643
+ocr_text	12	12468
+original	6	202135
+questions_json	2	6928
+tables_json	12	216
+(10 rows)

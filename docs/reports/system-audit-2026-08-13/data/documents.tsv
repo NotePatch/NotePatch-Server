@@ -1,0 +1,11 @@
+id	title	original_filename	file_type	document_kind	status	file_size	mime_type	detected_mime_type	scan_status	sha12	created_at	updated_at
+7c378a81-f216-422f-94a7-96608fd43fba	image_note	05-handwritten-image.png	image	note	ready	76728	image/png	image/png	clean	cdf2e88e4db9	2026-08-13 12:10:38.356961+00	2026-08-13 13:08:14.007071+00
+f19fe110-697b-44d0-ba1e-046b5654d57f	docx_note	06-note.docx	docx	note	ready	992	application/vnd.openxmlformats-officedocument.wordprocessingml.document	application/vnd.openxmlformats-officedocument.wordprocessingml.document	clean	2f491f9be87c	2026-08-13 12:10:38.483427+00	2026-08-13 12:19:51.37741+00
+2d4593cc-051f-444e-9ed5-143df11a343d	pptx_courseware	07-courseware.pptx	pptx	courseware	ready	4488	application/vnd.openxmlformats-officedocument.presentationml.presentation	application/vnd.openxmlformats-officedocument.presentationml.presentation	clean	4a34ce645e8c	2026-08-13 12:10:38.548099+00	2026-08-13 12:11:36.060177+00
+f09217d5-a40c-4a96-8d2c-c89f699ff0a2	math_homework	02-mathematics-homework.pdf	pdf	homework	ready	59899	application/pdf	application/pdf	clean	95462f0206ed	2026-08-13 12:10:38.643877+00	2026-08-13 12:37:24.928655+00
+abc81562-7bda-4dbd-9381-fd12a930a9ab	math_answer_key	02-mathematics-homework.pdf	pdf	answer_key	ready	59899	application/pdf	application/pdf	clean	95462f0206ed	2026-08-13 12:10:38.6932+00	2026-08-13 12:11:23.462827+00
+620605b2-1cff-4bf0-942f-d22129a4ade4	eicar	eicar.txt	other	other	failed	68	text/plain		failed		2026-08-13 12:10:38.748826+00	2026-08-13 12:10:38.868319+00
+4b4d5cad-5470-46a3-bb78-03ff7ef08396	mime_spoof	05-handwritten-image.png	image	other	failed	76728	application/pdf		failed		2026-08-13 12:10:38.807947+00	2026-08-13 12:10:38.918403+00
+4aae82ca-6838-4529-987b-29befc2c08d5	eicar_pdf	eicar.pdf	pdf	other	ready	129	application/pdf	application/pdf	clean	294a5be01a98	2026-08-13 12:12:57.068334+00	2026-08-13 12:16:05.650779+00
+68880b86-0194-4354-9d81-b36a65478ded	eicar.docx	eicar.docx	docx	other	failed	1166	application/vnd.openxmlformats-officedocument.wordprocessingml.document		infected		2026-08-13 12:17:02.102257+00	2026-08-13 12:17:03.124955+00
+(9 rows)

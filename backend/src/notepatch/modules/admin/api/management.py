@@ -465,6 +465,8 @@ def generate_flashcards(
         .where(StudyNoteVersion.learning_unit_id == unit.id)
         .order_by(StudyNoteVersion.version_no.desc())
     )
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Learning unit has no study note")
     task = TaskService(db).create_task(
         workspace_id=unit.workspace_id,
         task_type="generate_flashcards",
@@ -472,7 +474,7 @@ def generate_flashcards(
         resource_id=unit.id,
         payload={
             "learning_unit_id": unit.id,
-            "study_note_version_id": note.id if note else None,
+            "study_note_version_id": note.id,
             "expected_attempt_revision": unit.attempt_revision,
             "reason": "admin_generate",
         },

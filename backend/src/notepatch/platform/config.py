@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     task_max_attempts: int = 3
     task_retry_base_seconds: int = 5
     task_retry_max_seconds: int = 300
+    task_worker_lease_seconds: int = 60
+    task_orphan_recovery_grace_seconds: int = 90
+    task_orphan_recovery_interval_seconds: int = 30
     purge_task_max_attempts: int = 20
     task_cancellation_grace_seconds: int = 600
     gpu_lock_key: str = "notepatch:gpu:lease"
@@ -76,6 +79,7 @@ class Settings(BaseSettings):
     openclaw_gateway_model: str = "openclaw"
     openclaw_agent_model: str = "openai/gpt-5.4"
     openclaw_gateway_timeout_seconds: float = 120
+    openclaw_skill_timeout_seconds: float = 300
     openclaw_gateway_ready_timeout_seconds: float = 30
     openclaw_gateway_ready_poll_seconds: float = 2
     openclaw_gateway_scopes: str = "operator.write"
