@@ -18,6 +18,8 @@ class LearningUnitRead(ORMModel):
     attempt_revision: int = 0
     notes_generated_revision: int = 0
     note_generation_due_at: datetime | None = None
+    merge_status: str | None = None
+    merged_into_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -47,6 +49,12 @@ class KnowledgeChunkRead(ORMModel):
     created_at: datetime
 
 
+class StudyNoteRendering(BaseModel):
+    theme_id: str = "notepatch-paper-v1"
+    css_url: str = "/api/v1/assets/note-themes/notepatch-paper-v1.css"
+    wrapper_class: str = "np-note-theme"
+
+
 class StudyNoteVersionRead(ORMModel):
     id: str
     workspace_id: str
@@ -68,6 +76,7 @@ class StudyNoteVersionRead(ORMModel):
     metadata: dict = metadata_field()
     created_at: datetime
     download_urls: dict[str, str] | None = None
+    rendering: StudyNoteRendering = Field(default_factory=StudyNoteRendering)
 
 
 class LearningUnitDetailResponse(BaseModel):
@@ -79,7 +88,7 @@ class LearningUnitDetailResponse(BaseModel):
 class StudyNoteDownloadUrlResponse(BaseModel):
     note_version_id: str
     learning_unit_id: str
-    kind: Literal["html", "json", "highlighted_html", "highlight_map"]
+    kind: Literal["html", "json", "highlighted_html", "highlight_map", "rendered_html"]
     filename: str
     expires_in: int
     download_url: str
@@ -94,6 +103,10 @@ class StudyNoteRevisionCreate(BaseModel):
 class StudyNoteRevisionResponse(BaseModel):
     note: StudyNoteVersionRead
     downstream_tasks: list[dict] = Field(default_factory=list)
+
+
+class LearningUnitMergeRequest(BaseModel):
+    source_learning_unit_ids: list[str] = Field(min_length=1, max_length=50)
 
 
 class FlashcardRead(ORMModel):

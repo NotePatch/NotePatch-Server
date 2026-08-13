@@ -55,6 +55,7 @@ class ChatMessage(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     citations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     source_status: Mapped[str] = mapped_column(String(32), default="available", nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from notepatch.entrypoints.deps import get_storage_service, get_workspace_member
+from notepatch.entrypoints.deps import get_storage_service, get_task_service, get_workspace_member
 from notepatch.platform.database import get_db
 from notepatch.modules.documents.models.document import Document
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
@@ -28,18 +28,22 @@ from notepatch.modules.learning.schemas.learning import (
     StudyNoteVersionRead,
     StudyNoteRevisionCreate,
     StudyNoteRevisionResponse,
+    LearningUnitMergeRequest,
 )
 from notepatch.modules.identity.models.user import User
 from notepatch.entrypoints.deps import get_current_user
 from notepatch.modules.learning.services.notes import StudyNoteService
+from notepatch.modules.learning.services.note_render import NoteRenderService
 from notepatch.platform.storage import StorageService
+from notepatch.modules.tasks.schemas.task import TaskRead
+from notepatch.modules.tasks.services.task import TaskService
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/learning-units", tags=["learning"])
 
 
 def _get_learning_unit(db: Session, workspace_id: str, learning_unit_id: str) -> LearningUnit:
     learning_unit = db.scalar(
-        select(LearningUnit).where(LearningUnit.workspace_id == workspace_id, LearningUnit.id == learning_unit_id)
+        select(LearningUnit).where(LearningUnit.workspace_id == workspace_id, LearningUnit.id == learning_unit_id, LearningUnit.merged_into_id.is_(None))
     )
     if learning_unit is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning unit not found")
@@ -81,11 +85,13 @@ def _note_download_urls(storage: StorageService, note: StudyNoteVersion, expires
         "highlighted_html": note.highlighted_html_object_key,
         "highlight_map": note.highlight_map_object_key,
     }
-    return {
+    urls = {
         kind: storage.create_presigned_download_url(storage.bucket, object_key, expires_seconds)
         for kind, object_key in keys.items()
         if object_key
     }
+    urls["rendered_html"] = NoteRenderService().create_url(note, expires_seconds)
+    return urls
 
 
 @router.get("", response_model=list[LearningUnitRead])
@@ -97,7 +103,10 @@ def list_learning_units(
     _member: WorkspaceMember = Depends(get_workspace_member),
     db: Session = Depends(get_db),
 ) -> list[LearningUnit]:
-    query = select(LearningUnit).where(LearningUnit.workspace_id == workspace_id)
+    query = select(LearningUnit).where(
+        LearningUnit.workspace_id == workspace_id,
+        LearningUnit.merged_into_id.is_(None),
+    )
     if subject:
         query = query.where(LearningUnit.subject == subject)
     return db.scalars(
@@ -184,7 +193,7 @@ def get_study_note_download_url(
     workspace_id: str,
     learning_unit_id: str,
     note_version_id: str,
-    kind: Literal["html", "json", "highlighted_html", "highlight_map"] = Query(default="html"),
+    kind: Literal["html", "json", "highlighted_html", "highlight_map", "rendered_html"] = Query(default="html"),
     expires_seconds: int = Query(default=900, ge=60, le=86400),
     _member: WorkspaceMember = Depends(get_workspace_member),
     db: Session = Depends(get_db),
@@ -206,6 +215,15 @@ def get_study_note_download_url(
         "highlighted_html": note.highlighted_html_object_key,
         "highlight_map": note.highlight_map_object_key,
     }
+    if kind == "rendered_html":
+        return StudyNoteDownloadUrlResponse(
+            note_version_id=note.id,
+            learning_unit_id=learning_unit_id,
+            kind=kind,
+            filename="study-note.html",
+            expires_in=expires_seconds,
+            download_url=NoteRenderService().create_url(note, expires_seconds),
+        )
     object_key = object_key_by_kind[kind]
     if not object_key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Study note artifact not found")
@@ -323,3 +341,44 @@ def get_flashcard_deck(
     if deck is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flashcard deck not found")
     return _deck_detail(db, deck)
+
+
+@router.post("/{target_learning_unit_id}/merge", response_model=TaskRead, status_code=status.HTTP_202_ACCEPTED)
+def merge_learning_units(
+    workspace_id: str,
+    target_learning_unit_id: str,
+    payload: LearningUnitMergeRequest,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+    task_service: TaskService = Depends(get_task_service),
+):
+    source_ids = list(dict.fromkeys(payload.source_learning_unit_ids))
+    if target_learning_unit_id in source_ids:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Target cannot be a source")
+    units = db.scalars(
+        select(LearningUnit).where(
+            LearningUnit.workspace_id == workspace_id,
+            LearningUnit.id.in_([target_learning_unit_id, *source_ids]),
+            LearningUnit.merged_into_id.is_(None),
+        )
+    ).all()
+    if len(units) != len(source_ids) + 1:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning unit not found")
+    active = task_service.find_active_task(
+        workspace_id=workspace_id,
+        task_type="merge_learning_units",
+        resource_type="learning_unit",
+        resource_id=target_learning_unit_id,
+    )
+    if active is not None:
+        return active
+    return task_service.create_task(
+        workspace_id=workspace_id,
+        task_type="merge_learning_units",
+        resource_type="learning_unit",
+        resource_id=target_learning_unit_id,
+        payload={
+            "target_learning_unit_id": target_learning_unit_id,
+            "source_learning_unit_ids": source_ids,
+        },
+    )

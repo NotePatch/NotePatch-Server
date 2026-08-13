@@ -80,12 +80,14 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
             self._task_output_dirs[(workspace_id, task_id)] = Path(output_dir)
             Path(output_dir).mkdir(parents=True, exist_ok=True)
         request_body = self._build_request_body(payload)
+        provider_model = self._provider_model(payload)
         session_key = runtime.get("session_key") if isinstance(runtime.get("session_key"), str) else None
         response_json = self._post_chat_completion(
             request_body,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             session_key=session_key,
+            provider_model=provider_model,
         )
         answer = self._extract_answer(response_json)
         self._raise_embedded_gateway_error(answer)
@@ -93,6 +95,8 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
             "runner": "gateway",
             "answer": answer,
             "model": request_body["model"],
+            "gateway_model": request_body["model"],
+            "provider_model": provider_model,
             "response": response_json,
             "gateway_url": gateway_url,
             "gateway_container": runtime.get("gateway_container"),
@@ -192,6 +196,7 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         self,
         gateway_token: str | None = None,
         session_key: str | None = None,
+        provider_model: str | None = None,
     ) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
@@ -204,6 +209,8 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
             headers["x-openclaw-scopes"] = self.scopes
         if session_key:
             headers["x-openclaw-session-key"] = session_key
+        if provider_model:
+            headers["x-openclaw-model"] = provider_model
         return headers
 
     def _post_chat_completion(
@@ -213,6 +220,7 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         session_key: str | None = None,
+        provider_model: str | None = None,
     ) -> dict:
         base_url = (gateway_url or self.base_url).rstrip("/")
         self._wait_until_ready(base_url)
@@ -220,7 +228,7 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         try:
             response = self._client.post(
                 url,
-                headers=self._headers(gateway_token, session_key),
+                headers=self._headers(gateway_token, session_key, provider_model),
                 json=request_body,
             )
         except httpx.TimeoutException as exc:
@@ -284,6 +292,20 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         if isinstance(configured, str) and configured.strip():
             return configured.rstrip("/")
         return self.base_url
+
+    @staticmethod
+    def _provider_model(payload: dict) -> str | None:
+        value = payload.get("ai_model")
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise OpenClawRunnerError("OpenClaw provider model must be a string")
+        normalized = value.strip()
+        if not normalized or len(normalized) > 255 or any(character.isspace() for character in normalized):
+            raise OpenClawRunnerError("OpenClaw provider model is invalid")
+        if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+            raise OpenClawRunnerError("OpenClaw provider model is invalid")
+        return normalized
 
     @staticmethod
     def _context_note(runtime: dict) -> str:

@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from notepatch.modules.tasks.models.task import Task
 from notepatch.platform.errors import RetryableTaskError
-from notepatch.modules.ai.services.gateway import OpenClawRunner
+from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunner
+from notepatch.modules.ai.services.model_selection import AiModelSelectionService
 from notepatch.modules.ai.services.runtime import NOTEPATCH_SKILLS, OpenClawUserRuntimeService
 from notepatch.platform.storage import StorageService
 from notepatch.modules.tasks.services.task import TaskService
@@ -48,6 +49,21 @@ class OpenClawSkillRunner:
         if skill_name not in NOTEPATCH_SKILLS:
             raise ValueError(f"Unsupported OpenClaw skill: {skill_name}")
         tasks = TaskService(self.db)
+        model_selection = AiModelSelectionService(self.db)
+        provider_model, model_snapshotted = model_selection.resolve_for_task(task)
+        if model_snapshotted:
+            tasks.add_event(
+                task,
+                "ai_model_selected",
+                "AI model selected for task",
+                data={
+                    "provider_model": provider_model,
+                    "gateway_model": model_selection.settings.openclaw_gateway_model,
+                },
+            )
+        self.db.commit()
+        if isinstance(self.gateway_runner, OpenClawGatewayRunner):
+            model_selection.ensure_credentials(provider_model)
         tasks.ensure_active(task)
         runtime = self.runtime.sync_workspace_documents(
             db=self.db,
@@ -98,6 +114,7 @@ class OpenClawSkillRunner:
             skill_name=skill_name,
             output_filename=output_filename,
             session_key=session_key,
+            provider_model=provider_model,
         )
         self.gateway_runner.prepare_task_dir(task.workspace_id, task.id)
         run_result = self.gateway_runner.run_task(task.workspace_id, task.id, request)
@@ -135,6 +152,8 @@ class OpenClawSkillRunner:
             "output_key": output_key,
             "gateway_container": runtime["container_name"],
             "gateway_url": runtime["gateway_url"],
+            "provider_model": provider_model,
+            "gateway_model": model_selection.settings.openclaw_gateway_model,
             "run_result": run_result,
         }
 
@@ -155,6 +174,7 @@ class OpenClawSkillRunner:
         skill_name: str,
         output_filename: str,
         session_key: str,
+        provider_model: str,
     ) -> dict:
         return {
             "prompt": (
@@ -165,6 +185,7 @@ class OpenClawSkillRunner:
             ),
             "input": {"skill": skill_name, "output_filename": output_filename},
             "options": {},
+            "ai_model": provider_model,
             "_openclaw": {
                 "gateway_url": runtime["gateway_url"],
                 "gateway_token": runtime["gateway_token"],

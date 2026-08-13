@@ -118,10 +118,12 @@ def test_openclaw_worker_fails_fast_without_openai_key(client, db_sessionmaker, 
             assert task is not None
             assert task.status == "failed"
             assert "OPENAI_API_KEY" in (task.error_message or "")
-            events = db.query(TaskEvent).filter_by(task_id=task_id, event_type="openclaw_prepare").all()
-            assert events
-            assert events[0].data["model"] == settings.openclaw_gateway_model
-            assert events[0].data["gateway_container"].startswith("notepatch-openclaw-")
+            events = db.query(TaskEvent).filter_by(task_id=task_id).all()
+            event_types = {event.event_type for event in events}
+            assert event_types >= {"ai_model_selected", "failed"}
+            selected = next(event for event in events if event.event_type == "ai_model_selected")
+            assert selected.data["gateway_model"] == settings.openclaw_gateway_model
+            assert selected.data["provider_model"] == settings.openclaw_agent_model
     finally:
         settings.openai_api_key = old_key
 

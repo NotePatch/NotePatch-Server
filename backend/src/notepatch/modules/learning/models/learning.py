@@ -28,6 +28,10 @@ class LearningUnit(Base):
     attempt_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     notes_generated_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     note_generation_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    merged_into_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("learning_units.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

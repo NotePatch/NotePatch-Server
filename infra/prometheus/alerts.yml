@@ -1,0 +1,13 @@
+groups:
+  - name: notepatch
+    rules:
+      - alert: NotePatchHighErrorRate
+        expr: sum(rate(notepatch_http_requests_total{status=~"5.."}[5m])) > 0.2
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "NotePatch API error rate is elevated"}
+      - alert: NotePatchQueueBacklog
+        expr: notepatch_queue_length > 50
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "NotePatch task queue backlog is elevated"}

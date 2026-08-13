@@ -11,6 +11,7 @@ from notepatch.modules.documents.models.document import Document, DocumentArtifa
 from notepatch.modules.documents.models.upload import UploadSession
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
+from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.storage import StorageService
 from notepatch.modules.documents.services.tusd import TusdService
 from notepatch.shared.filenames import infer_file_type, sanitize_filename
@@ -35,6 +36,11 @@ class UploadService:
         title: str | None,
         metadata: dict | None = None,
     ) -> tuple[Document, UploadSession, dict[str, str], str]:
+        if file_size is not None and file_size > self.settings.upload_max_file_size_mb * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds the {self.settings.upload_max_file_size_mb} MB limit",
+            )
         document_id = str(uuid.uuid4())
         safe_filename = sanitize_filename(filename)
         object_key = self.storage.document_original_key(workspace_id, document_id, safe_filename)
@@ -170,7 +176,19 @@ class UploadService:
             )
             file_size = file_size if file_size is not None else local_file_path.stat().st_size
 
-        document.status = "uploaded"
+        actual_size = file_size if file_size is not None else document.file_size
+        if actual_size is not None and actual_size > self.settings.upload_max_file_size_mb * 1024 * 1024:
+            self.storage.delete_object(upload_session.bucket, upload_session.object_key)
+            upload_session.status = "failed"
+            document.status = "failed"
+            document.scan_status = "failed"
+            document.scan_message = f"File exceeds the {self.settings.upload_max_file_size_mb} MB limit"
+            self.db.commit()
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=document.scan_message)
+
+        document.status = "scanning" if self.settings.clamav_enabled else "uploaded"
+        document.scan_status = "pending" if self.settings.clamav_enabled else "skipped"
+        document.scan_message = None
         document.bucket = upload_session.bucket
         document.object_key = upload_session.object_key
         document.mime_type = mime_type or document.mime_type
@@ -199,7 +217,15 @@ class UploadService:
             )
         self.db.commit()
         self.db.refresh(document)
-        if self.settings.auto_learning_pipeline:
+        if self.settings.clamav_enabled:
+            TaskService(self.db).create_task(
+                workspace_id=document.workspace_id,
+                task_type="scan_document",
+                resource_type="document",
+                resource_id=document.id,
+                payload={"document_id": document.id},
+            )
+        elif self.settings.auto_learning_pipeline:
             LearningWorkflowService(self.db, self.storage).schedule_after_upload(document)
         return document
 

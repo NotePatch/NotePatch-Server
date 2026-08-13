@@ -2,7 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from notepatch.entrypoints.deps import get_current_user, get_task_service, get_workspace_member
+from notepatch.entrypoints.deps import (
+    get_ai_model_catalog_service,
+    get_current_user,
+    get_task_service,
+    get_workspace_member,
+)
 from notepatch.platform.database import get_db
 from notepatch.modules.identity.services.permissions import require_member_permission
 from notepatch.modules.documents.models.document import Document
@@ -11,6 +16,9 @@ from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.identity.models.workspace import WorkspaceMember
 from notepatch.modules.ai.schemas.ai import (
+    AiModelCatalogRead,
+    AiModelSelectionRead,
+    AiModelSelectionUpdate,
     ChatConversationPage,
     ChatConversationRead,
     ChatConversationUpdate,
@@ -21,9 +29,62 @@ from notepatch.modules.ai.schemas.ai import (
 )
 from notepatch.modules.tasks.schemas.task import TaskRead
 from notepatch.modules.ai.services.chat import ChatConversationNotFoundError, ChatService
+from notepatch.modules.ai.services.model_catalog import (
+    AiModelCatalogService,
+    AiModelCatalogUnavailableError,
+    AiModelNotFoundError,
+)
+from notepatch.modules.ai.services.model_selection import AiModelSelectionService
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.platform.config import get_settings
+from notepatch.platform.rate_limit import RateLimiter
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/ai", tags=["ai"])
+
+
+@router.get("/models", response_model=AiModelCatalogRead)
+def list_ai_models(
+    workspace_id: str,
+    member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    catalog: AiModelCatalogService = Depends(get_ai_model_catalog_service),
+) -> dict:
+    require_member_permission(db, member, "ai.run")
+    try:
+        result = catalog.get_catalog()
+        selected = AiModelSelectionService(db).selected_for_user(current_user)
+    except AiModelCatalogUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return {**result, "selected_model": selected}
+
+
+@router.put("/model", response_model=AiModelSelectionRead)
+def select_ai_model(
+    workspace_id: str,
+    payload: AiModelSelectionUpdate,
+    member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    catalog: AiModelCatalogService = Depends(get_ai_model_catalog_service),
+) -> AiModelSelectionRead:
+    require_member_permission(db, member, "ai.run")
+    preferred_model = None
+    if payload.model_id is not None:
+        try:
+            preferred_model = catalog.validate_model(payload.model_id)
+        except AiModelNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        except AiModelCatalogUnavailableError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    current_user.preferred_ai_model = preferred_model
+    db.commit()
+    db.refresh(current_user)
+    return AiModelSelectionRead(
+        selected_model=preferred_model or catalog.default_model,
+        preferred_model=preferred_model,
+        default_model=catalog.default_model,
+    )
 
 
 @router.post("/chat", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
@@ -35,6 +96,7 @@ def chat(
     task_service: TaskService = Depends(get_task_service),
 ) -> Task:
     require_member_permission(task_service.db, member, "ai.run")
+    RateLimiter().check("ai", current_user.id, get_settings().ai_rate_limit_per_minute)
     try:
         return ChatService(task_service.db).create_chat_task(
             workspace_id=workspace_id,

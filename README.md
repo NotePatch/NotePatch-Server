@@ -470,9 +470,13 @@ GET    /workspaces/{workspace_id}/ai/conversations/{conversation_id}/messages
 PATCH  /workspaces/{workspace_id}/ai/conversations/{conversation_id}
 DELETE /workspaces/{workspace_id}/ai/conversations/{conversation_id}
 PATCH  /auth/preferences {"ai_history_enabled": true|false}
+GET    /workspaces/{workspace_id}/ai/models
+PUT    /workspaces/{workspace_id}/ai/model {"model_id": "openai/model-id" | null}
 ```
 
 `ai_history_enabled` 是用户全局开关，默认开启。关闭后历史仍可回看，但 worker 不会把它带入后续 OpenClaw 请求；开启时每次最多传入 `AI_CHAT_HISTORY_MESSAGE_LIMIT`（默认 20）条成功消息。它不写入或修改 OpenClaw `MEMORY.md`，后者仍是独立的 agent 长期记忆机制。
+
+模型目录接口由 FastAPI 使用部署级凭据请求 `${OPENAI_BASE_URL}/models`，前端不会接触 provider key。`PUT /ai/model` 保存用户全局模型偏好；传 `null` 恢复 `OPENCLAW_AGENT_MODEL`。该选择影响随后创建的聊天、知识库、题目提取、学霸笔记、批改、高亮和闪卡任务。任务首次执行时会把实际模型固化到 `task.payload.ai_model`，因此重试不会因用户中途切换模型而漂移。目录默认缓存 300 秒；provider 临时不可用时可返回最后一次成功目录并标记 `stale=true`。
 
 ```text
 /home/usr/notepatch-data/openclaw/users/{user_id}/
@@ -486,7 +490,7 @@ PATCH  /auth/preferences {"ai_history_enabled": true|false}
   .env
 ```
 
-MVP 使用部署级共享 OpenAI provider key：在 notepatch `.env` 配置 `OPENAI_API_KEY`，supervisor 会把它作为环境变量注入每个用户 gateway 容器。`OPENCLAW_GATEWAY_MODEL` 是调用 gateway `/v1/chat/completions` 的模型名，必须是 `openclaw` 或 `openclaw/<agentId>`；`OPENCLAW_AGENT_MODEL` 才是写入 per-user `openclaw.json` 的 provider 模型，例如 `openai/gpt-5.4`。真实 key 不会写入每用户 `.env`、`openclaw.json` 或 `auth-profiles.json`；auth profile 只保存 `OPENAI_API_KEY` 的 env secret reference。若使用 OpenAI-compatible 代理或私有 endpoint，可配置 `OPENAI_BASE_URL=https://proxy.example.com/v1`，notepatch 会写入每用户 `openclaw.json` 的 `models.providers.openai.baseUrl`；空值表示使用 OpenClaw/OpenAI 默认 endpoint。若缺少 `OPENAI_API_KEY`，OpenClaw task 会在调用 gateway 前失败，并在 `task.error_message` 中提示配置后重启 `worker` 和 `openclaw-supervisor`。
+MVP 使用部署级共享 OpenAI provider key：在 notepatch `.env` 配置 `OPENAI_API_KEY`，supervisor 会把它作为环境变量注入每个用户 gateway 容器。`OPENCLAW_GATEWAY_MODEL` 是调用 gateway `/v1/chat/completions` 的 agent 目标，必须是 `openclaw` 或 `openclaw/<agentId>`；`OPENCLAW_AGENT_MODEL` 是用户未选择模型时的 provider 默认值。真实调用始终保持请求体 `model=openclaw`，并通过 `x-openclaw-model` 发送用户选择的 `openai/<model-id>`，避免把 provider 模型误传到 gateway model 字段。真实 key 不会写入每用户 `.env`、`openclaw.json` 或 `auth-profiles.json`；auth profile 只保存 `OPENAI_API_KEY` 的 env secret reference。若使用 OpenAI-compatible 代理或私有 endpoint，可配置 `OPENAI_BASE_URL=https://proxy.example.com/v1`，notepatch 会写入每用户 `openclaw.json` 的 `models.providers.openai.baseUrl`；空值表示使用 OpenClaw/OpenAI 默认 endpoint。若缺少 `OPENAI_API_KEY`，真实 OpenClaw task 会在调用 gateway 前失败，并在 `task.error_message` 中给出配置提示。
 
 每用户 gateway 默认由 `openclaw-supervisor` 按在线状态自动启动和停止，不暴露宿主端口，只加入 `notepatch-server_default` 网络。API/worker 不挂 Docker socket；只有 supervisor 挂 `/var/run/docker.sock`。supervisor 会自动读取 Docker socket 的 gid，并通过 `group_add` 授权用户 gateway 内的 `node` 用户访问 Docker API；如部署环境需要固定值，可设置 `OPENCLAW_DOCKER_SOCKET_GID=125` 一类的覆盖项。运维也可按用户手动启动：
 
@@ -620,7 +624,7 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 6. 有答案或 rubric 时为 `official` 评分；没有依据时必须为 `provisional` 诊断性评分并带置信度。
 7. 错题会写入 mistakes 和带 BGE-M3 embedding 的知识块，再由 `notepatch_note_highlighter` 更新电子笔记。
 
-学习单元按 document metadata 自动归类：优先使用 `learning_unit_id`，否则使用 `learning_unit_title`、`topic`、`subject`，最后落到“未归类学习单元”。当前是个人 workspace-only，所有 learning tables 都带 `workspace_id`。
+学习单元优先使用有效的 `learning_unit_id`；未指定时每个文件创建一个独立学习单元，不再落入共享的“未归类学习单元”。当前是个人 workspace-only，所有 learning tables 都带 `workspace_id`。
 
 查询结果：
 
@@ -705,7 +709,7 @@ docker compose exec ocr-worker python /opt/notepatch/scripts/ocr_smoke_test.py /
 
 `ocr-worker` 使用 `paddleocr-cache:/models/paddlex` 持久化模型；`embedding-service` 使用 `bge-cache`。DocTr、PaddleOCR 和 BGE-M3 通过 Redis GPU lease 全局串行，lease 带 token、TTL 和自动续租。`OCR_WORKER_CONCURRENCY=1`，单卡部署不要横向扩容 GPU worker。
 
-DOCX/PPTX 第一版不会直接 OCR，会失败并提示先转换为 PDF 或图片。后续可在 `DocumentConverter` 接口中接 LibreOffice 转换。
+DOCX/PPTX 先由内网 LibreOffice converter 转为 `converted_pdf` artifact，再复用 PDF OCR；转换失败会明确写入 task/events。
 
 知识检索与评分依据接口：
 
@@ -754,3 +758,60 @@ pip install -r requirements.txt
 pytest
 ```
 # NotePatch-Server
+
+
+## Production hardening
+
+The upload path is fail-closed in production:
+
+1. tusd accepts at most `UPLOAD_MAX_FILE_SIZE_MB` (200 MB by default).
+2. `scan_document` computes SHA-256, detects MIME with libmagic, and scans the object with ClamAV.
+3. MIME spoofing, malware, scanner unavailability, or oversize input fails the document and removes the untrusted object.
+4. Clean DOCX/PPTX files are converted by the internal LibreOffice service to a `converted_pdf` artifact before OCR.
+5. Images and PDFs continue through OCR, knowledge, HTML notes, flashcards, and OpenClaw tasks.
+
+A document without a valid `learning_unit_id` creates its own learning unit. Merge units asynchronously:
+
+```http
+POST /api/v1/workspaces/{workspace_id}/learning-units/{target_id}/merge
+Content-Type: application/json
+
+{"source_learning_unit_ids":["source-unit-id"]}
+```
+
+The response is a `202 TaskRead`. Poll the task or stream ordered events:
+
+```http
+GET /api/v1/workspaces/{workspace_id}/tasks/{task_id}/events
+GET /api/v1/workspaces/{workspace_id}/tasks/{task_id}/events/stream
+Authorization: Bearer <access-token>
+Last-Event-ID: 12
+```
+
+SSE emits monotonic event IDs, heartbeat comments, and a final `done` event. Existing polling remains supported.
+
+Study notes are validated safe HTML fragments. Clients should prefer the signed `download_urls.rendered_html` URL, which wraps the newest highlighted/plain fragment with the immutable `notepatch-paper-v1` theme and a strict CSP. The public stylesheet is `/api/v1/assets/note-themes/notepatch-paper-v1.css`.
+
+### Operations
+
+Validate and migrate before replacing containers:
+
+```bash
+docker compose config --quiet
+docker compose run --rm api alembic upgrade head
+docker compose up -d --build api worker chat-worker converter clamav admin-web
+docker compose --profile ocr up -d --build ocr-worker
+```
+
+Start backups and monitoring after setting non-default `RESTIC_PASSWORD` and `GRAFANA_ADMIN_PASSWORD`:
+
+```bash
+docker compose --profile ops up -d --build backup prometheus grafana
+docker compose --profile ops run --rm backup sh /opt/notepatch/scripts/backup/backup_once.sh
+docker compose --profile ops run --rm backup sh /opt/notepatch/scripts/backup/list.sh
+docker compose --profile ops run --rm backup sh /opt/notepatch/scripts/backup/check.sh
+```
+
+Backups contain a PostgreSQL custom dump, a logical SeaweedFS S3 mirror, configuration manifest, and checksums under `${NOTEPATCH_DATA_ROOT}/backups`; Restic keeps 14 daily snapshots. Restore requires an explicit new target directory and never overwrites the running environment.
+
+Host exposure is limited to API `8001`, admin `5173`, tusd `1080`, signed S3 downloads `8333`, and optional Grafana `3000`. PostgreSQL, Redis, SeaweedFS master/filer, DocTr, embedding, converter, ClamAV, and Prometheus remain internal.

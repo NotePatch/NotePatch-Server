@@ -164,6 +164,7 @@ def test_gateway_runner_ignores_provider_model_for_gateway_request(openclaw_sett
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content.decode("utf-8"))
+        captured["provider_model"] = request.headers.get("x-openclaw-model")
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -171,11 +172,18 @@ def test_gateway_runner_ignores_provider_model_for_gateway_request(openclaw_sett
     result = runner.run_task(
         "workspace-1",
         "task-1",
-        {"prompt": "hello", "input": {}, "options": {"model": "openai/gpt-5.4"}},
+        {
+            "prompt": "hello",
+            "input": {},
+            "options": {"model": "openai/ignored-provider-model"},
+            "ai_model": "openai/gpt-5.4",
+        },
     )
 
     assert captured["body"]["model"] == "openclaw"
+    assert captured["provider_model"] == "openai/gpt-5.4"
     assert result["model"] == "openclaw"
+    assert result["provider_model"] == "openai/gpt-5.4"
 
 
 def test_gateway_runner_raises_readable_error_for_http_failure(openclaw_settings):

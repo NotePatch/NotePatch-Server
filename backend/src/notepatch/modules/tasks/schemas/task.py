@@ -30,6 +30,7 @@ class TaskEventRead(ORMModel):
     id: str
     workspace_id: str
     task_id: str
+    sequence_no: int
     event_type: str
     level: str
     message: str

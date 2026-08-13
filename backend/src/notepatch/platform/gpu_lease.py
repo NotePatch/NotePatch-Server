@@ -10,6 +10,7 @@ import redis
 
 from notepatch.platform.config import get_settings
 from notepatch.platform.errors import RetryableTaskError
+from notepatch.platform.metrics import GPU_LEASE_EVENTS
 
 
 class GpuLeaseError(RetryableTaskError):
@@ -28,7 +29,11 @@ class GpuLeaseService:
 
     @contextmanager
     def lease(self, *, owner: str, event_callback: Callable[[str, dict], None] | None = None):
-        callback = event_callback or (lambda _event, _data: None)
+        raw_callback = event_callback or (lambda _event, _data: None)
+
+        def callback(event: str, data: dict) -> None:
+            GPU_LEASE_EVENTS.labels(event).inc()
+            raw_callback(event, data)
         if not self.settings.gpu_lock_enabled:
             yield
             return

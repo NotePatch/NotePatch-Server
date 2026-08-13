@@ -83,3 +83,42 @@ def validate_knowledge_point_references(value: str, allowed_ids: set[str]) -> No
     unknown = referenced_knowledge_point_ids(value) - allowed_ids
     if unknown:
         raise ValueError(f"Study note HTML contains unknown knowledge point ids: {', '.join(sorted(unknown))}")
+
+
+def validate_note_structure(value: str) -> None:
+    from html.parser import HTMLParser
+
+    class StructureParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.root = False
+            self.title = False
+            self.summary = False
+            self.sections: set[str] = set()
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            values = dict(attrs)
+            classes = set((values.get("class") or "").split())
+            if "np-note" in classes and tag in {"article", "section", "div"}:
+                self.root = True
+            if "np-note-title" in classes and tag in {"h1", "h2"}:
+                self.title = True
+            if "np-note-summary" in classes:
+                self.summary = True
+            point_id = values.get("data-knowledge-point-id")
+            if point_id and ({"np-note-section", "np-knowledge-point"} & classes):
+                self.sections.add(point_id)
+
+    parser = StructureParser()
+    parser.feed(value)
+    missing = []
+    if not parser.root:
+        missing.append(".np-note root")
+    if not parser.title:
+        missing.append(".np-note-title")
+    if not parser.summary:
+        missing.append(".np-note-summary")
+    if not parser.sections:
+        missing.append("knowledge-point sections")
+    if missing:
+        raise ValueError(f"Study note HTML is missing required structure: {', '.join(missing)}")

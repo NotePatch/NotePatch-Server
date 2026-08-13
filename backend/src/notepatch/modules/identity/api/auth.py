@@ -2,12 +2,13 @@ from datetime import datetime, timedelta, timezone
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.entrypoints.deps import get_authenticated_user, get_current_user, get_presence_service
 from notepatch.platform.config import get_settings
+from notepatch.platform.rate_limit import RateLimiter
 from notepatch.platform.database import get_db, utcnow
 from notepatch.modules.identity.services.permissions import get_role, seed_roles_and_permissions
 from notepatch.platform.security import (
@@ -84,7 +85,8 @@ def _issue_tokens(
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    RateLimiter().check("register", request.client.host if request.client else "unknown", get_settings().auth_rate_limit_per_minute)
     email = _normalize_email(payload.email)
     if db.scalar(select(User.id).where(User.email == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -107,7 +109,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    RateLimiter().check("login", request.client.host if request.client else "unknown", get_settings().auth_rate_limit_per_minute)
     email = _normalize_email(payload.email)
     user = db.scalar(select(User).where(User.email == email))
     if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):

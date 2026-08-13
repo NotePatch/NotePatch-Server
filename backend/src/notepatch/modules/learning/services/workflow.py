@@ -77,27 +77,22 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
         subject = _string_or_none(metadata.get("subject"))
         grade_level = _string_or_none(metadata.get("grade_level"))
         topic = _string_or_none(metadata.get("topic"))
-        title = _string_or_none(metadata.get("learning_unit_title")) or topic or subject or "未归类学习单元"
-        query = select(LearningUnit).where(
-            LearningUnit.workspace_id == document.workspace_id,
-            LearningUnit.title == title,
+        title = (
+            _string_or_none(metadata.get("learning_unit_title"))
+            or document.title
+            or document.original_filename
+            or "学习资料"
         )
-        query = query.where(LearningUnit.subject.is_(None) if subject is None else LearningUnit.subject == subject)
-        query = query.where(
-            LearningUnit.grade_level.is_(None) if grade_level is None else LearningUnit.grade_level == grade_level
+        learning_unit = LearningUnit(
+            workspace_id=document.workspace_id,
+            title=title[:255],
+            subject=subject,
+            grade_level=grade_level,
+            topic=topic,
+            metadata_={"source": "automatic_pipeline", "source_document_id": document.id},
         )
-        learning_unit = self.db.scalar(query)
-        if learning_unit is None:
-            learning_unit = LearningUnit(
-                workspace_id=document.workspace_id,
-                title=title,
-                subject=subject,
-                grade_level=grade_level,
-                topic=topic,
-                metadata_={"source": "automatic_pipeline"},
-            )
-            self.db.add(learning_unit)
-            self.db.flush()
+        self.db.add(learning_unit)
+        self.db.flush()
         metadata["learning_unit_id"] = learning_unit.id
         document.metadata_ = metadata
         self._link_document(learning_unit, document)

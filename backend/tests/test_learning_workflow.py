@@ -120,7 +120,7 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
 
         units = client.get(f"/api/v1/workspaces/{workspace_id}/learning-units", headers=auth_headers(user["access_token"]))
         assert units.status_code == 200, units.text
-        assert units.json()[0]["title"] == "Quadratic Equations"
+        assert units.json()[0]["title"] == "algebra-courseware.png"
 
         notes = client.get(
             f"/api/v1/workspaces/{workspace_id}/learning-units/{learning_unit.id}/notes?include_download_url=true",

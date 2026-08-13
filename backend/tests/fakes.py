@@ -93,7 +93,10 @@ class FakeSkillRunner:
             payload = {
                 "title": "Linear Functions Scholar Notes",
                 "html": (
-                    f'<article class="np-note"><section class="np-note-section np-knowledge-point" '
+                    '<article class="np-note"><header class="np-note-header">'
+                    '<h1 class="np-note-title">Linear Functions Scholar Notes</h1>'
+                    '<p class="np-note-summary">A compact review of linear functions.</p></header>'
+                    f'<section class="np-note-section np-knowledge-point" '
                     f'data-knowledge-point-id="{point["id"]}"><h2>Linear Functions</h2>'
                     "<p><strong>Linear functions</strong> have a constant rate of change.</p></section></article>"
                 ),

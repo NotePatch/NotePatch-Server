@@ -112,6 +112,11 @@ def test_supervisor_starts_gateway_for_online_user(client, db_sessionmaker):
 
     container = docker_client.containers.get(f"notepatch-openclaw-{user_id}")
     run_kwargs = docker_client.containers.run_calls[0]
+    assert run_kwargs["mem_limit"] == get_settings().openclaw_gateway_memory_limit
+    assert run_kwargs["nano_cpus"] == get_settings().openclaw_gateway_nano_cpus
+    assert run_kwargs["pids_limit"] == get_settings().openclaw_gateway_pids_limit
+    assert run_kwargs["security_opt"] == ["no-new-privileges:true"]
+    assert run_kwargs["cap_drop"] == ["ALL"]
     assert container.status == "running"
     assert run_kwargs["network"] == "notepatch-server_default"
     assert run_kwargs["labels"]["notepatch.user_id"] == user_id

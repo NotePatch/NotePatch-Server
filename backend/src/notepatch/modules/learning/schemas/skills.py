@@ -57,6 +57,27 @@ class ScholarNotesResult(StrictResult):
     review_suggestions: list[str] = Field(default_factory=list)
     source_document_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_html_contract(self):
+        from notepatch.modules.learning.services.html_notes import (
+            sanitize_note_html,
+            validate_knowledge_point_references,
+            validate_note_structure,
+        )
+
+        cleaned = sanitize_note_html(self.html)
+        validate_note_structure(cleaned)
+        allowed_ids = {item.id for item in self.knowledge_points}
+        validate_knowledge_point_references(cleaned, allowed_ids)
+        referenced = {item.id for item in self.knowledge_points}
+        missing_sections = referenced - set(
+            __import__("re").findall(r'data-knowledge-point-id="([^"]+)"', cleaned)
+        )
+        if missing_sections:
+            raise ValueError(f"Scholar note sections are missing: {', '.join(sorted(missing_sections))}")
+        self.html = cleaned
+        return self
+
 
 class PerQuestionGrade(StrictResult):
     sequence_no: int = Field(ge=1)

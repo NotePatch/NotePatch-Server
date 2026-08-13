@@ -23,6 +23,8 @@ from notepatch.modules.documents.schemas.document import (
 from notepatch.modules.tasks.schemas.task import TaskRead
 from notepatch.modules.documents.services.document import DocumentService
 from notepatch.platform.storage import StorageService
+from notepatch.platform.config import get_settings
+from notepatch.platform.rate_limit import RateLimiter
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.modules.documents.services.tusd import TusdService
 from notepatch.modules.documents.services.upload import UploadService
@@ -62,6 +64,7 @@ def create_upload_session(
     storage: StorageService = Depends(get_storage_service),
 ) -> UploadSessionResponse:
     _require_document_write(member)
+    RateLimiter().check("upload", current_user.id, get_settings().upload_rate_limit_per_minute)
     document, upload_session, tus_metadata, tus_metadata_header = UploadService(db, storage).create_upload_session(
         workspace_id=workspace_id,
         user=current_user,

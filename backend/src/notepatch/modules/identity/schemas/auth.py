@@ -14,6 +14,7 @@ class UserRead(ORMModel):
     is_active: bool
     must_change_password: bool
     ai_history_enabled: bool
+    preferred_ai_model: str | None = None
     created_at: datetime
 
 

@@ -5,6 +5,10 @@ x-backend: &backend
   build:
     context: .
     dockerfile: infra/docker/backend.Dockerfile
+    args:
+      RELEASE_REVISION: ${GIT_SHA:-dev}
+      RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
+      SCHEMA_REVISION: 202608130001
   env_file:
     - path: .env
       required: false
@@ -12,6 +16,9 @@ x-backend: &backend
     NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
     OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
     OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+    PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-}
+    CLAMAV_ENABLED: ${CLAMAV_ENABLED:-true}
+    RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
   extra_hosts:
     - host.docker.internal:host-gateway
 
@@ -49,6 +56,7 @@ services:
       OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
       OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
       WORKER_QUEUES: default
+      CLAMAV_ENABLED: ${CLAMAV_ENABLED:-true}
     volumes:
       - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
     depends_on:
@@ -60,6 +68,8 @@ services:
         condition: service_started
       embedding-service:
         condition: service_started
+      clamav:
+        condition: service_healthy
 
   chat-worker:
     <<: *backend
@@ -115,6 +125,8 @@ services:
       seaweedfs-s3:
         condition: service_started
       docserver:
+        condition: service_healthy
+      converter:
         condition: service_healthy
       embedding-service:
         condition: service_started
@@ -182,17 +194,103 @@ services:
       retries: 10
       start_period: 600s
 
+  converter:
+    build:
+      context: .
+      dockerfile: infra/docker/converter.Dockerfile
+    image: notepatch-converter:local
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1 >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
   admin-web:
     build:
       context: .
       dockerfile: infra/docker/admin.Dockerfile
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8001/api/v1}
+      args:
+        VITE_API_BASE_URL: /api/v1
+    restart: unless-stopped
     ports:
-      - "0.0.0.0:${ADMIN_WEB_PORT:-5173}:5173"
+      - "0.0.0.0:${ADMIN_WEB_PORT:-5173}:80"
     depends_on:
       api:
         condition: service_healthy
+
+  backup:
+    profiles: ["ops"]
+    build:
+      context: .
+      dockerfile: infra/docker/backup.Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_PLAIN: postgresql://${POSTGRES_USER:-notepatch}:${POSTGRES_PASSWORD:-notepatch}@postgres:5432/${POSTGRES_DB:-notepatch}
+      SEAWEEDFS_S3_ENDPOINT: http://seaweedfs-s3:8333
+      SEAWEEDFS_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY:-notepatch}
+      SEAWEEDFS_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY:-notepatch-secret}
+      SEAWEEDFS_BUCKET: ${SEAWEEDFS_BUCKET:-notepatch}
+      AWS_DEFAULT_REGION: us-east-1
+      RESTIC_REPOSITORY: /backups/restic
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
+      SCHEMA_REVISION: 202608130001
+      RELEASE_REVISION: ${GIT_SHA:-dev}
+    volumes:
+      - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+
+  prometheus:
+    profiles: ["ops"]
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=30d"]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    profiles: ["ops"]
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-grafana-password}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "0.0.0.0:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -219,16 +317,14 @@ services:
       retries: 20
 
   seaweedfs-master:
-    image: chrislusf/seaweedfs:latest
+    image: chrislusf/seaweedfs:4.38
     restart: unless-stopped
     command: master -ip=seaweedfs-master -ip.bind=0.0.0.0
-    ports:
-      - "0.0.0.0:9333:9333"
     volumes:
       - seaweedfs_master:/data
 
   seaweedfs-volume:
-    image: chrislusf/seaweedfs:latest
+    image: chrislusf/seaweedfs:4.38
     restart: unless-stopped
     command: volume -mserver=seaweedfs-master:9333 -ip=seaweedfs-volume -ip.bind=0.0.0.0 -port=8080
     depends_on:
@@ -237,19 +333,17 @@ services:
       - seaweedfs_volume:/data
 
   seaweedfs-filer:
-    image: chrislusf/seaweedfs:latest
+    image: chrislusf/seaweedfs:4.38
     restart: unless-stopped
     command: filer -master=seaweedfs-master:9333 -ip=seaweedfs-filer -ip.bind=0.0.0.0
     depends_on:
       - seaweedfs-master
       - seaweedfs-volume
-    ports:
-      - "0.0.0.0:8888:8888"
     volumes:
       - seaweedfs_filer:/data
 
   seaweedfs-s3:
-    image: chrislusf/seaweedfs:latest
+    image: chrislusf/seaweedfs:4.38
     restart: unless-stopped
     command: s3 -filer=seaweedfs-filer:8888 -ip.bind=0.0.0.0 -port=8333 -config=/etc/seaweedfs/s3_config.json
     depends_on:
@@ -269,6 +363,7 @@ services:
       - -base-path=/files/
       - -upload-dir=/data
       - -disable-download
+      - -max-size=${UPLOAD_MAX_BYTES:-209715200}
       - -hooks-http=http://api:8000/api/v1/webhooks/tusd?secret=${TUSD_WEBHOOK_SECRET:-change-me-tusd-webhook-secret}
       - -hooks-enabled-events=post-create,post-finish,post-terminate
     ports:
@@ -294,3 +389,9 @@ volumes:
     name: notepatch-server_paddleocr-cache
   bge-cache:
     name: notepatch-server_bge-cache
+  clamav-data:
+    name: notepatch-server_clamav-data
+  prometheus-data:
+    name: notepatch-server_prometheus-data
+  grafana-data:
+    name: notepatch-server_grafana-data

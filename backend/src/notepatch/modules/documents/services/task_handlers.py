@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.documents.ocr import OcrPipeline
 from notepatch.modules.documents.services.doctr import DocTrClient
+from notepatch.modules.documents.services.converter import DocumentConverterClient
 from notepatch.modules.documents.services.task_support import (
     _auto_learning_enabled,
     _complete_ocr_artifacts,
@@ -64,7 +65,11 @@ def process_document_pipeline(
             storage.download_file(document.bucket, document.object_key, original)
             source_path = original
             source_artifact = None
-            if document.file_type == "image" and get_settings().doctr_enabled:
+            if document.file_type in {"docx", "pptx"}:
+                source_artifact = _prepare_converted_pdf(db, tasks, task, document, storage, original, workdir, force)
+                source_path = workdir / "converted.pdf"
+                storage.download_file(source_artifact.bucket, source_artifact.object_key, source_path)
+            elif document.file_type == "image" and get_settings().doctr_enabled:
                 try:
                     source_artifact = _doctr_preprocess(
                         db, tasks, task, document, storage, doctr_client, gpu_lease
@@ -135,19 +140,27 @@ def process_ocr_document(
                 artifacts = None
                 _warning(db, tasks, task, "ocr_metadata_stale", str(exc))
         if artifacts is None:
-            source_artifact = _latest_artifact(db, task.workspace_id, document.id, "deskewed_image")
-            if source_artifact is not None:
-                source = workdir / "deskewed_image.png"
-                try:
-                    storage.download_file(source_artifact.bucket, source_artifact.object_key, source)
-                except Exception as exc:
-                    if not StorageService.is_object_not_found_error(exc):
-                        raise
-                    source_artifact = None
-                    _warning(db, tasks, task, "deskewed_object_missing", str(exc))
-            if source_artifact is None:
-                source = workdir / f"original.{_document_extension(document)}"
-                storage.download_file(document.bucket, document.object_key, source)
+            source_artifact = None
+            if document.file_type in {"docx", "pptx"}:
+                original = workdir / f"original.{_document_extension(document)}"
+                storage.download_file(document.bucket, document.object_key, original)
+                source_artifact = _prepare_converted_pdf(db, tasks, task, document, storage, original, workdir, force)
+                source = workdir / "converted.pdf"
+                storage.download_file(source_artifact.bucket, source_artifact.object_key, source)
+            else:
+                source_artifact = _latest_artifact(db, task.workspace_id, document.id, "deskewed_image")
+                if source_artifact is not None:
+                    source = workdir / "deskewed_image.png"
+                    try:
+                        storage.download_file(source_artifact.bucket, source_artifact.object_key, source)
+                    except Exception as exc:
+                        if not StorageService.is_object_not_found_error(exc):
+                            raise
+                        source_artifact = None
+                        _warning(db, tasks, task, "deskewed_object_missing", str(exc))
+                if source_artifact is None:
+                    source = workdir / f"original.{_document_extension(document)}"
+                    storage.download_file(document.bucket, document.object_key, source)
             _, artifacts = _run_and_store_ocr(
                 db,
                 tasks,
@@ -229,7 +242,11 @@ def _run_and_store_ocr(
             workspace_id=task.workspace_id,
             source=source,
             mime_type=source_artifact.mime_type if source_artifact else document.mime_type,
-            file_type="image" if source_artifact else document.file_type,
+            file_type=(
+                "image" if source_artifact and source_artifact.artifact_type == "deskewed_image"
+                else "pdf" if source_artifact and source_artifact.artifact_type == "converted_pdf"
+                else document.file_type
+            ),
             event_callback=ocr_event,
         )
     tasks.ensure_active(task)
@@ -345,3 +362,170 @@ def _doctr_preprocess(
         db.commit()
     _progress(db, tasks, task, "doctr_succeeded", "DocTr image rectification completed", 45)
     return artifact
+
+
+
+def _prepare_converted_pdf(
+    db: Session,
+    tasks: TaskService,
+    task: Task,
+    document: Document,
+    storage: StorageService,
+    original_path: Path,
+    workdir: Path,
+    force: bool,
+) -> DocumentArtifact:
+    existing = None if force else _latest_artifact(
+        db, task.workspace_id, document.id, "converted_pdf"
+    )
+    if existing is not None and storage.object_exists(existing.bucket, existing.object_key):
+        tasks.add_event(
+            task, "conversion_reused", "Existing converted PDF reused", progress=20,
+            data={"artifact_id": existing.id},
+        )
+        db.commit()
+        return existing
+    tasks.add_event(task, "conversion_started", "Office document conversion started", progress=15)
+    db.commit()
+    output = workdir / "converted-output.pdf"
+    DocumentConverterClient().convert_to_pdf(
+        original_path,
+        output,
+        filename=document.original_filename,
+        mime_type=document.mime_type,
+    )
+    tasks.ensure_active(task)
+    artifact_id = str(uuid.uuid4())
+    key = storage.document_artifact_key(
+        task.workspace_id, document.id, artifact_id, "converted_pdf", "pdf"
+    )
+    metadata = {"processor": "libreoffice", "task_id": task.id, "source_document_id": document.id}
+    storage.put_file(document.bucket, key, output, content_type="application/pdf", metadata=metadata)
+    tasks.ensure_active(task)
+    artifact = DocumentArtifact(
+        id=artifact_id,
+        workspace_id=task.workspace_id,
+        document_id=document.id,
+        artifact_type="converted_pdf",
+        bucket=document.bucket,
+        object_key=key,
+        mime_type="application/pdf",
+        file_size=output.stat().st_size,
+        metadata_=metadata,
+    )
+    db.add(artifact)
+    tasks.add_event(
+        task, "conversion_succeeded", "Office document converted to PDF", progress=30,
+        data={"artifact_id": artifact.id},
+    )
+    db.commit()
+    return artifact
+
+def process_scan_document(
+    db: Session,
+    tasks: TaskService,
+    task: Task,
+    storage: StorageService,
+) -> None:
+    from sqlalchemy import delete, select
+
+    from notepatch.modules.documents.services.scanner import (
+        DocumentScanError,
+        DocumentScanner,
+        MalwareDetectedError,
+    )
+    from notepatch.platform.database import utcnow
+    from notepatch.platform.errors import PermanentTaskError
+    from notepatch.platform.metrics import SCAN_RESULTS
+
+    tasks.ensure_active(task)
+    document = _required_task_document(db, task)
+    if document.scan_status == "clean" and document.sha256 and document.detected_mime_type:
+        tasks.mark_succeeded(task, {"document_id": document.id, "reused": True})
+        return
+    tasks.add_event(task, "scan_started", "Document security scan started", progress=10)
+    db.commit()
+    with tempfile.TemporaryDirectory(prefix=f"notepatch-scan-{task.id}-") as tmpdir:
+        source = Path(tmpdir) / "upload.bin"
+        try:
+            storage.download_file(document.bucket, document.object_key, source)
+            result = DocumentScanner().scan(source, document.mime_type)
+        except Exception as exc:
+            scan_status = "infected" if isinstance(exc, MalwareDetectedError) else "failed"
+            SCAN_RESULTS.labels(scan_status).inc()
+            document.status = "failed"
+            document.scan_status = scan_status
+            document.scan_message = str(exc)[:500]
+            document.scanned_at = utcnow()
+            try:
+                storage.delete_object(document.bucket, document.object_key)
+            except Exception:
+                pass
+            db.execute(
+                delete(DocumentArtifact).where(
+                    DocumentArtifact.workspace_id == task.workspace_id,
+                    DocumentArtifact.document_id == document.id,
+                    DocumentArtifact.artifact_type == "original",
+                )
+            )
+            tasks.add_event(
+                task,
+                "scan_rejected",
+                "Document failed security validation",
+                level="error",
+                progress=100,
+                data={"scan_status": scan_status, "reason": str(exc)[:500]},
+            )
+            db.commit()
+            raise PermanentTaskError(str(exc)) from exc
+
+    SCAN_RESULTS.labels("clean").inc()
+    document.sha256 = result.sha256
+    document.detected_mime_type = result.detected_mime_type
+    document.mime_type = result.detected_mime_type
+    document.file_size = result.file_size
+    document.scan_status = "clean"
+    document.scan_message = None
+    document.scanned_at = utcnow()
+    document.status = "uploaded"
+    artifact = db.scalar(
+        select(DocumentArtifact).where(
+            DocumentArtifact.workspace_id == task.workspace_id,
+            DocumentArtifact.document_id == document.id,
+            DocumentArtifact.artifact_type == "original",
+        )
+    )
+    if artifact is not None:
+        artifact.mime_type = result.detected_mime_type
+        artifact.file_size = result.file_size
+        artifact.metadata_ = {
+            **(artifact.metadata_ or {}),
+            "sha256": result.sha256,
+            "scan_status": "clean",
+            "scanner": "clamav" if get_settings().clamav_enabled else "disabled",
+        }
+    tasks.add_event(
+        task,
+        "scan_succeeded",
+        "Document security scan completed",
+        progress=90,
+        data={
+            "sha256": result.sha256,
+            "detected_mime_type": result.detected_mime_type,
+            "file_size": result.file_size,
+        },
+    )
+    db.commit()
+    downstream = None
+    if get_settings().auto_learning_pipeline:
+        downstream = LearningWorkflowService(db, storage).schedule_after_upload(document)
+    tasks.mark_succeeded(
+        task,
+        {
+            "document_id": document.id,
+            "scan_status": "clean",
+            "sha256": result.sha256,
+            "detected_mime_type": result.detected_mime_type,
+            "downstream_task_id": downstream.id if downstream else None,
+        },
+    )

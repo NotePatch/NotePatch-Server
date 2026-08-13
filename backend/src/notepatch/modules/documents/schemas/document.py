@@ -5,11 +5,12 @@ from pydantic import BaseModel, Field
 
 from notepatch.shared.schemas import ORMModel, metadata_field
 
-DocumentStatus = Literal["created", "uploading", "uploaded", "processing", "ready", "failed", "deleted"]
+DocumentStatus = Literal["created", "uploading", "uploaded", "scanning", "processing", "ready", "failed", "deleted"]
 FileType = Literal["image", "pdf", "docx", "pptx", "audio", "video", "other"]
 DocumentKind = Literal["homework", "corrected_homework", "courseware", "note", "exam", "answer_key", "rubric", "other"]
 ArtifactType = Literal[
     "original",
+    "converted_pdf",
     "deskewed_image",
     "binary_image",
     "ocr_json",
@@ -56,6 +57,10 @@ class DocumentRead(ORMModel):
     upload_id: str | None = None
     tus_upload_url: str | None = None
     sha256: str | None = None
+    scan_status: str = "pending"
+    scan_message: str | None = None
+    scanned_at: datetime | None = None
+    detected_mime_type: str | None = None
     status: str
     purge_status: str | None = None
     purge_task_id: str | None = None

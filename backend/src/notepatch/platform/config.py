@@ -50,12 +50,25 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_secure: bool = False
     presign_expire_seconds: int = 3600
+    public_api_base_url: str = ""
     backend_cors_origins: str = "*"
 
     tusd_base_url: str = "http://localhost:1080/files/"
     tusd_internal_base_url: str = "http://tusd:1080/files/"
     tusd_webhook_secret: str = "change-me-tusd-webhook-secret"
     tusd_data_dir: str = "/tusd-data"
+    upload_max_file_size_mb: int = 200
+    upload_allowed_mime_types: str = (
+        "image/jpeg,image/png,image/webp,image/tiff,application/pdf,"
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    clamav_enabled: bool = False
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_timeout_seconds: float = 120
+    converter_base_url: str = "http://converter:8000"
+    converter_timeout_seconds: float = 180
 
     openclaw_workdir: str = "/tmp/notepatch-openclaw"
     openclaw_gateway_base_url: str = "http://host.docker.internal:18789"
@@ -78,10 +91,16 @@ class Settings(BaseSettings):
     openclaw_docker_socket_gid: int | None = None
     openclaw_supervisor_poll_seconds: float = 10
     openclaw_supervisor_container_stop_timeout_seconds: int = 20
+    openclaw_gateway_memory_limit: str = "2g"
+    openclaw_gateway_nano_cpus: int = 1_500_000_000
+    openclaw_gateway_pids_limit: int = 256
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_organization: str | None = None
     openai_project: str | None = None
+    ai_model_catalog_ttl_seconds: int = 300
+    ai_provider_timeout_seconds: float = 15
+    ai_model_allowlist: str = ""
     ai_chat_history_message_limit: int = 20
     study_note_debounce_seconds: int = 300
     knowledge_point_match_threshold: float = 0.88
@@ -128,6 +147,17 @@ class Settings(BaseSettings):
     knowledge_search_limit: int = 6
 
     auto_learning_pipeline: bool = True
+    task_sse_poll_seconds: float = 1.0
+    task_sse_heartbeat_seconds: float = 15.0
+    note_render_token_expire_seconds: int = 900
+    metrics_token: str | None = None
+    release_revision: str = "dev"
+    release_build_time: str = "unknown"
+    schema_revision: str = "202608130001"
+    rate_limit_enabled: bool = False
+    auth_rate_limit_per_minute: int = 20
+    upload_rate_limit_per_minute: int = 30
+    ai_rate_limit_per_minute: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -143,6 +173,19 @@ class Settings(BaseSettings):
     @property
     def admin_email_set(self) -> set[str]:
         return {email.strip().lower() for email in self.admin_emails.split(",") if email.strip()}
+
+    @property
+    def ai_model_allowlist_set(self) -> set[str]:
+        return {
+            model.strip()
+            for model in self.ai_model_allowlist.split(",")
+            if model.strip()
+        }
+
+    @property
+    def upload_allowed_mime_type_set(self) -> set[str]:
+        return {value.strip().lower() for value in self.upload_allowed_mime_types.split(",") if value.strip()}
+
 
     @property
     def effective_secret_key(self) -> str:

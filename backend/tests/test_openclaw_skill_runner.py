@@ -72,7 +72,12 @@ class CorrectingRunner:
 
 
 def _task() -> Task:
-    return Task(id="task-1", workspace_id="workspace-1", task_type="extract_questions", payload={})
+    return Task(
+        id="task-1",
+        workspace_id="workspace-1",
+        task_type="extract_questions",
+        payload={"ai_model": "openai/gpt-5.4"},
+    )
 
 
 def test_skill_runner_corrects_invalid_output_in_same_session(db_sessionmaker, fake_storage, tmp_path):
@@ -93,6 +98,8 @@ def test_skill_runner_corrects_invalid_output_in_same_session(db_sessionmaker, f
     assert result.questions[0].answer == "4"
     assert len(gateway.calls) == 2
     assert {call["_openclaw"]["session_key"] for call in gateway.calls} == {metadata["session_key"]}
+    assert {call["ai_model"] for call in gateway.calls} == {"openai/gpt-5.4"}
+    assert metadata["provider_model"] == "openai/gpt-5.4"
     skill_input = json.loads((tmp_path / "task-1" / "input" / "input.json").read_text(encoding="utf-8"))
     assert skill_input["_output_contract"]["filename"] == "questions.json"
     assert skill_input["_output_contract"]["json_schema"]["required"] == ["questions"]

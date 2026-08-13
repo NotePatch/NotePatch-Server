@@ -100,6 +100,11 @@ class OpenClawContainerManager:
                 labels=spec.labels,
                 network=spec.network,
                 restart_policy={"Name": "unless-stopped"},
+                mem_limit=self.settings.openclaw_gateway_memory_limit,
+                nano_cpus=self.settings.openclaw_gateway_nano_cpus,
+                pids_limit=self.settings.openclaw_gateway_pids_limit,
+                security_opt=["no-new-privileges:true"],
+                cap_drop=["ALL"],
             )
             return container
 
@@ -198,6 +203,13 @@ class OpenClawContainerManager:
             "volumes": volumes,
             "group_add": group_add,
             "openclaw_json": openclaw_config,
+            "resources": {
+                "memory": self.settings.openclaw_gateway_memory_limit,
+                "nano_cpus": self.settings.openclaw_gateway_nano_cpus,
+                "pids_limit": self.settings.openclaw_gateway_pids_limit,
+                "security_opt": ["no-new-privileges:true"],
+                "cap_drop": ["ALL"],
+            },
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

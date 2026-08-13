@@ -3,6 +3,22 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Bold, Heading2, Italic, List, ListOrdered, Redo2, Undo2 } from "lucide-react";
 import { type ReactNode, useEffect } from "react";
+import { API_BASE_URL } from "../lib/api";
+
+
+const NOTE_THEME_URL = `${API_BASE_URL.replace(/\/api\/v1\/?$/, "")}/api/v1/assets/note-themes/notepatch-paper-v1.css`;
+
+function useNoteTheme() {
+  useEffect(() => {
+    const selector = 'link[data-notepatch-note-theme="notepatch-paper-v1"]';
+    if (document.head.querySelector(selector)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = NOTE_THEME_URL;
+    link.dataset.notepatchNoteTheme = "notepatch-paper-v1";
+    document.head.appendChild(link);
+  }, []);
+}
 
 type Props = {
   value: string;
@@ -10,6 +26,7 @@ type Props = {
 };
 
 export function HtmlNoteEditor({ value, onChange }: Props) {
+  useNoteTheme();
   const editor = useEditor({
     extensions: [StarterKit],
     content: value,
@@ -40,6 +57,7 @@ export function HtmlNoteEditor({ value, onChange }: Props) {
 }
 
 export function HtmlNotePreview({ html }: { html: string }) {
+  useNoteTheme();
   return <article
     className="html-note-preview np-note-theme"
     dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html) }}

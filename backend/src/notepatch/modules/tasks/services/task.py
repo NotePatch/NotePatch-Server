@@ -3,13 +3,14 @@ from datetime import timedelta
 
 import redis
 from fastapi import HTTPException, status
-from sqlalchemy import inspect as sqlalchemy_inspect, select, update
+from sqlalchemy import func, inspect as sqlalchemy_inspect, select, update
 from sqlalchemy.orm import Session
 
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import utcnow
 from notepatch.modules.tasks.models.task import TASK_TYPES, Task, TaskEvent
 from notepatch.platform.errors import TaskCancelledError
+from notepatch.platform.metrics import observe_task
 from notepatch.modules.tasks.services.queue import queue_name_for_task_type, redis_key_for_queue, retry_key_for_queue
 
 logger = logging.getLogger(__name__)
@@ -93,9 +94,18 @@ class TaskService:
         progress: int | None = None,
         data: dict | None = None,
     ) -> TaskEvent:
+        # Include events already added in this transaction before allocating the next sequence.
+        self.db.flush()
+        self.db.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+        sequence_no = self.db.scalar(
+            select(func.coalesce(func.max(TaskEvent.sequence_no), 0) + 1).where(
+                TaskEvent.task_id == task.id
+            )
+        )
         event = TaskEvent(
             workspace_id=task.workspace_id,
             task_id=task.id,
+            sequence_no=int(sequence_no or 1),
             event_type=event_type,
             level=level,
             message=message,
@@ -398,6 +408,7 @@ class TaskService:
             return
         self.db.refresh(task)
         self.add_event(task, "succeeded", "Task succeeded", progress=100, data=task.result)
+        observe_task(task, "succeeded")
         self.db.commit()
 
     def mark_failed(self, task: Task, error: str) -> None:
@@ -421,4 +432,5 @@ class TaskService:
             return
         self.db.refresh(task)
         self.add_event(task, "failed", "Task failed", level="error", data={"error": error})
+        observe_task(task, "failed")
         self.db.commit()

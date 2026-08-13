@@ -1,3 +1,4 @@
+from sqlalchemy import select
 import json
 
 from notepatch.platform.config import get_settings
@@ -178,7 +179,7 @@ def test_pdf_max_pages_failure_marks_task_failed(client, db_sessionmaker, fake_s
         settings.ocr_max_pages = old_max_pages
 
 
-def test_docx_requires_conversion_before_ocr(client, db_sessionmaker, fake_storage):
+def test_docx_is_converted_to_pdf_before_ocr(client, db_sessionmaker, fake_storage, monkeypatch):
     user = register_user(client, "ocr-docx@example.com")
     workspace_id = first_workspace_id(client, user["access_token"])
     upload = _create_document(
@@ -194,11 +195,22 @@ def test_docx_requires_conversion_before_ocr(client, db_sessionmaker, fake_stora
         "metadata": {},
         "body": b"docx mock",
     }
+    monkeypatch.setattr(
+        "notepatch.modules.documents.services.task_handlers.DocumentConverterClient.convert_to_pdf",
+        lambda _self, _source, destination, **_kwargs: destination.write_bytes(minimal_pdf_bytes()),
+    )
     task_id = _process(client, user["access_token"], workspace_id, upload["document"]["id"])
     with db_sessionmaker() as db:
         task = process_task(db, task_id, storage=fake_storage)
-        assert task.status == "failed"
-        assert "converted to PDF or image" in (task.error_message or "")
+        assert task.status == "succeeded"
+        converted = db.scalar(
+            select(DocumentArtifact).where(
+                DocumentArtifact.document_id == upload["document"]["id"],
+                DocumentArtifact.artifact_type == "converted_pdf",
+            )
+        )
+        assert converted is not None
+        assert converted.mime_type == "application/pdf"
 
 
 def test_malicious_filename_does_not_affect_ocr_object_keys(client, db_sessionmaker, fake_storage):

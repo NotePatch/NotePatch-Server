@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.chat import ChatService
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunner
+from notepatch.modules.ai.services.model_selection import AiModelSelectionService
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.documents.services.task_support import _progress
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
@@ -28,6 +29,22 @@ def process_openclaw_chat(
     runner: OpenClawRunner,
     embedding_client: EmbeddingClient,
 ) -> None:
+    model_selection = AiModelSelectionService(db)
+    provider_model, model_snapshotted = model_selection.resolve_for_task(task)
+    ChatService(db).set_assistant_model(task, provider_model)
+    if model_snapshotted:
+        tasks.add_event(
+            task,
+            "ai_model_selected",
+            "AI model selected for task",
+            data={
+                "provider_model": provider_model,
+                "gateway_model": get_settings().openclaw_gateway_model,
+            },
+        )
+    db.commit()
+    if isinstance(runner, OpenClawGatewayRunner):
+        model_selection.ensure_credentials(provider_model)
     runtime = OpenClawUserRuntimeService().sync_workspace_documents(
         db=db,
         storage=storage,
@@ -48,7 +65,8 @@ def process_openclaw_chat(
             "gateway_url": runtime["gateway_url"],
             "gateway_container": runtime["container_name"],
             "model": get_settings().openclaw_gateway_model,
-            "agent_model": get_settings().openclaw_agent_model,
+            "agent_model": provider_model,
+            "provider_model": provider_model,
             "documents_synced": runtime["documents_synced"],
             "files_synced": runtime["files_synced"],
             "documents_skipped": runtime["documents_skipped"],
@@ -115,7 +133,6 @@ def process_openclaw_chat(
         "host_task_output_dir": runtime["host_task_output_dir"],
         "session_key": f"notepatch:{task.workspace_id}:chat:{task.payload.get('conversation_id') or task.id}",
     }
-    _validate_openclaw_credentials(runner)
     tasks.ensure_active(task)
     _progress(db, tasks, task, "openclaw_run", "OpenClaw chat started", 70)
     result = runner.run_task(task.workspace_id, task.id, payload)
@@ -143,12 +160,19 @@ def process_openclaw_chat(
         }
         for item in citations
     ]
-    ChatService(db).mark_assistant_succeeded(task, answer.strip(), citations=result_citations)
+    ChatService(db).mark_assistant_succeeded(
+        task,
+        answer.strip(),
+        citations=result_citations,
+        model_id=provider_model,
+    )
     tasks.mark_succeeded(
         task,
         {
             "answer": answer.strip(),
             "runner": "gateway",
+            "gateway_model": get_settings().openclaw_gateway_model,
+            "provider_model": provider_model,
             "gateway_container": runtime["container_name"],
             "output_key": output_key,
             "output_keys": output_keys,
@@ -183,9 +207,3 @@ def _upload_openclaw_outputs(
         ensure_active()
         keys.append(key)
     return keys
-
-
-def _validate_openclaw_credentials(runner: OpenClawRunner) -> None:
-    if isinstance(runner, OpenClawGatewayRunner) and get_settings().openclaw_agent_model.startswith("openai/"):
-        if not get_settings().openai_api_key:
-            raise PermanentTaskError("OPENAI_API_KEY is required by the configured OpenClaw model")

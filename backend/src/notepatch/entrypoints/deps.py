@@ -10,6 +10,7 @@ from notepatch.modules.identity.models.workspace import Workspace, WorkspaceMemb
 from notepatch.platform.storage import StorageService
 from notepatch.modules.identity.services.presence import PresenceService
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.ai.services.model_catalog import AiModelCatalogService
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -67,3 +68,7 @@ def get_presence_service() -> PresenceService:
 
 def get_task_service(db: Session = Depends(get_db)) -> TaskService:
     return TaskService(db)
+
+
+def get_ai_model_catalog_service() -> AiModelCatalogService:
+    return AiModelCatalogService()

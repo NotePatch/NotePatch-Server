@@ -13,10 +13,12 @@ from notepatch.modules.documents.services.purge import DocumentPurgeService
 from notepatch.modules.documents.services.task_handlers import (
     process_document_pipeline,
     process_ocr_document,
+    process_scan_document,
 )
 from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.modules.learning.services.task_handlers import run_learning_task
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
+from notepatch.modules.learning.services.merge import LearningUnitMergeService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.errors import PermanentTaskError
@@ -50,7 +52,9 @@ class TaskExecutionContext:
 
 def execute_registered_task(context: TaskExecutionContext) -> None:
     task = context.task
-    if task.task_type == "document_processing_pipeline":
+    if task.task_type == "scan_document":
+        process_scan_document(context.db, context.tasks, task, context.storage)
+    elif task.task_type == "document_processing_pipeline":
         process_document_pipeline(
             context.db,
             context.tasks,
@@ -73,6 +77,11 @@ def execute_registered_task(context: TaskExecutionContext) -> None:
         )
     elif task.task_type in LEARNING_TASK_TYPES:
         run_learning_task(context.tasks, task, context.learning, context.storage)
+    elif task.task_type == "merge_learning_units":
+        context.tasks.add_event(task, "merge_claimed", "Learning unit merge task claimed", progress=5)
+        context.db.commit()
+        result = LearningUnitMergeService(context.db, context.storage).execute(task)
+        context.tasks.mark_succeeded(task, result)
     elif task.task_type == "purge_document":
         context.tasks.add_event(task, "document_purge_started", "Document purge started", progress=10)
         context.db.commit()

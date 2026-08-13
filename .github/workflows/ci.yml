@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: notepatch
+          POSTGRES_USER: notepatch
+          POSTGRES_PASSWORD: notepatch
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U notepatch -d notepatch"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://notepatch:notepatch@localhost:5432/notepatch
+      ENVIRONMENT: test
+      CLAMAV_ENABLED: "false"
+      RATE_LIMIT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r backend/requirements/base.txt
+      - run: python -m compileall backend/src services scripts
+      - run: pytest -q
+      - name: Migration round trip
+        working-directory: backend
+        run: |
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
+
+  admin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "20", cache: npm, cache-dependency-path: web/admin/package-lock.json}
+      - run: npm ci
+      - run: npm run build
+
+  compose-and-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose build api admin-web converter

@@ -7,11 +7,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from notepatch.platform.database import Base, utcnow
 
 
-DOCUMENT_STATUSES = {"created", "uploading", "uploaded", "processing", "ready", "failed", "deleted"}
+DOCUMENT_STATUSES = {"created", "uploading", "uploaded", "scanning", "processing", "ready", "failed", "deleted"}
 FILE_TYPES = {"image", "pdf", "docx", "pptx", "audio", "video", "other"}
 DOCUMENT_KINDS = {"homework", "corrected_homework", "courseware", "note", "exam", "answer_key", "rubric", "other"}
 ARTIFACT_TYPES = {
     "original",
+    "converted_pdf",
     "deskewed_image",
     "binary_image",
     "ocr_json",
@@ -53,6 +54,10 @@ class Document(Base):
     upload_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tus_upload_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scan_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    scan_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    detected_mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="created", nullable=False)
     purge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     purge_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

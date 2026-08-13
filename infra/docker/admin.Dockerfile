@@ -1,11 +1,14 @@
-FROM node:20-alpine
-
+FROM node:20-alpine AS build
 WORKDIR /opt/notepatch/web/admin
-
 COPY web/admin/package*.json ./
 RUN npm ci
-
 COPY web/admin ./
+ARG VITE_API_BASE_URL=/api/v1
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+RUN npm run build
 
-EXPOSE 5173
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+FROM nginx:1.27-alpine
+COPY infra/docker/admin-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /opt/notepatch/web/admin/dist /usr/share/nginx/html
+EXPOSE 80
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD wget -q -O /dev/null http://localhost/ || exit 1

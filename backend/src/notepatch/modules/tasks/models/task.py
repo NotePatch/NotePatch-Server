@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from notepatch.platform.database import Base, utcnow
@@ -20,6 +20,8 @@ TASK_TYPES = {
     "document_processing_pipeline",
     "purge_document",
     "purge_user",
+    "scan_document",
+    "merge_learning_units",
 }
 TASK_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
 
@@ -62,6 +64,7 @@ class Task(Base):
 class TaskEvent(Base):
     __tablename__ = "task_events"
     __table_args__ = (
+        UniqueConstraint("task_id", "sequence_no", name="uq_task_events_task_sequence"),
         Index("ix_task_events_workspace_id", "workspace_id"),
         Index("ix_task_events_workspace_id_task_id", "workspace_id", "task_id"),
     )
@@ -71,6 +74,7 @@ class TaskEvent(Base):
         String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
+    sequence_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     level: Mapped[str] = mapped_column(String(16), default="info", nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)

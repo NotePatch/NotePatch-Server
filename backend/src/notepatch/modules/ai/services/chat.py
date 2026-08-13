@@ -190,7 +190,14 @@ class ChatService:
             message.status = "running"
             self.db.commit()
 
-    def mark_assistant_succeeded(self, task: Task, answer: str, *, citations: list[dict] | None = None) -> None:
+    def mark_assistant_succeeded(
+        self,
+        task: Task,
+        answer: str,
+        *,
+        citations: list[dict] | None = None,
+        model_id: str | None = None,
+    ) -> None:
         message = self._assistant_message_for_task(task)
         if message is None:
             return
@@ -199,7 +206,13 @@ class ChatService:
         message.error_message = None
         message.citations = [self._safe_citation(item) for item in (citations or [])]
         message.source_status = "available"
+        message.model_id = model_id
         self._touch_conversation(message.conversation_id)
+
+    def set_assistant_model(self, task: Task, model_id: str) -> None:
+        message = self._assistant_message_for_task(task)
+        if message is not None:
+            message.model_id = model_id
 
     def mark_assistant_failed(self, task: Task, error: str) -> None:
         message = self._assistant_message_for_task(task)
