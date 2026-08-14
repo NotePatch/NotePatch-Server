@@ -7,7 +7,17 @@ from notepatch.shared.schemas import ORMModel, metadata_field
 
 DocumentStatus = Literal["created", "uploading", "uploaded", "scanning", "processing", "ready", "failed", "deleted"]
 FileType = Literal["image", "pdf", "docx", "pptx", "audio", "video", "other"]
-DocumentKind = Literal["homework", "corrected_homework", "courseware", "note", "exam", "answer_key", "rubric", "other"]
+DocumentKind = Literal[
+    "homework",
+    "corrected_homework",
+    "courseware",
+    "note",
+    "exam",
+    "answer_key",
+    "rubric",
+    "chat_attachment",
+    "other",
+]
 ArtifactType = Literal[
     "original",
     "converted_pdf",

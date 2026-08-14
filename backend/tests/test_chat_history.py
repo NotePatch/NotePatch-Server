@@ -61,7 +61,7 @@ def create_ready_image(client, db_sessionmaker, fake_storage, token: str, worksp
             "filename": filename,
             "mime_type": "image/jpeg",
             "file_size": len(body),
-            "document_kind": "note",
+            "document_kind": "chat_attachment",
             "title": filename,
         },
     )

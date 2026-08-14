@@ -6,7 +6,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from notepatch.modules.documents.models.document import Document, DocumentArtifact
+from notepatch.modules.documents.models.document import (
+    AUTO_LEARNING_DOCUMENT_KINDS,
+    Document,
+    DocumentArtifact,
+)
 from notepatch.modules.documents.ocr import OcrPipeline
 from notepatch.modules.documents.services.doctr import DocTrClient
 from notepatch.modules.documents.services.converter import DocumentConverterClient
@@ -519,6 +523,9 @@ def process_scan_document(
     downstream = None
     if get_settings().auto_learning_pipeline:
         downstream = LearningWorkflowService(db, storage).schedule_after_upload(document)
+        if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
+            document.status = "ready"
+            db.commit()
     tasks.mark_succeeded(
         task,
         {

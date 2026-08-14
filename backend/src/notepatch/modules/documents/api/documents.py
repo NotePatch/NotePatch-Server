@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from notepatch.entrypoints.deps import get_current_user, get_storage_service, get_task_service, get_workspace_member
 from notepatch.platform.database import get_db
-from notepatch.modules.documents.models.document import Document, DocumentArtifact
+from notepatch.modules.documents.models.document import CHAT_ATTACHMENT_KIND, Document, DocumentArtifact
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.documents.models.upload import UploadSession
 from notepatch.modules.identity.models.user import User
@@ -234,6 +234,11 @@ def process_document(
 ) -> Task:
     _require_document_write(member)
     document = DocumentService(db, storage).get_document(workspace_id, document_id)
+    if document.document_kind == CHAT_ATTACHMENT_KIND:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Chat attachments are available to AI chat but cannot enter the learning pipeline",
+        )
     force = bool(payload.options.get("force_reprocess"))
     active = task_service.find_active_task(
         workspace_id=workspace_id,

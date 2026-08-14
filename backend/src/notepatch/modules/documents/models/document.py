@@ -9,7 +9,17 @@ from notepatch.platform.database import Base, utcnow
 
 DOCUMENT_STATUSES = {"created", "uploading", "uploaded", "scanning", "processing", "ready", "failed", "deleted"}
 FILE_TYPES = {"image", "pdf", "docx", "pptx", "audio", "video", "other"}
-DOCUMENT_KINDS = {"homework", "corrected_homework", "courseware", "note", "exam", "answer_key", "rubric", "other"}
+CHAT_ATTACHMENT_KIND = "chat_attachment"
+AUTO_LEARNING_DOCUMENT_KINDS = {
+    "homework",
+    "corrected_homework",
+    "courseware",
+    "note",
+    "exam",
+    "answer_key",
+    "rubric",
+}
+DOCUMENT_KINDS = AUTO_LEARNING_DOCUMENT_KINDS | {CHAT_ATTACHMENT_KIND, "other"}
 ARTIFACT_TYPES = {
     "original",
     "converted_pdf",

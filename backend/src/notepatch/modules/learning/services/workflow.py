@@ -10,7 +10,12 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from notepatch.modules.documents.models.document import Document, DocumentArtifact
+from notepatch.modules.documents.models.document import (
+    AUTO_LEARNING_DOCUMENT_KINDS,
+    CHAT_ATTACHMENT_KIND,
+    Document,
+    DocumentArtifact,
+)
 from notepatch.modules.learning.models.homework import GradingResult, Homework, HomeworkReference, Mistake, Question
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import LearningUnit, LearningUnitDocument, StudyNoteVersion
@@ -60,6 +65,8 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
         self.embedding_client = embedding_client or EmbeddingClient()
 
     def ensure_learning_unit_for_document(self, document: Document) -> LearningUnit:
+        if document.document_kind == CHAT_ATTACHMENT_KIND:
+            raise PermanentTaskError("Chat attachments cannot be added to learning units")
         metadata = dict(document.metadata_ or {})
         learning_unit_id = metadata.get("learning_unit_id")
         if isinstance(learning_unit_id, str) and learning_unit_id:
@@ -101,6 +108,8 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
         return learning_unit
 
     def schedule_after_upload(self, document: Document) -> Task | None:
+        if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
+            return None
         if self._existing_task_by_resource(
             document.workspace_id, "document_processing_pipeline", document.id
         ):
@@ -125,6 +134,8 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
         ocr_artifacts: dict[str, DocumentArtifact],
         force_reprocess: bool = False,
     ) -> list[Task]:
+        if document.document_kind == CHAT_ATTACHMENT_KIND:
+            return []
         learning_unit = self.ensure_learning_unit_for_document(document)
         ocr_run_id = (ocr_artifacts.get("ocr_json").metadata_ or {}).get("ocr_run_id")
         common = {

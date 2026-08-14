@@ -7,7 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.platform.config import get_settings
-from notepatch.modules.documents.models.document import Document, DocumentArtifact
+from notepatch.modules.documents.models.document import (
+    AUTO_LEARNING_DOCUMENT_KINDS,
+    Document,
+    DocumentArtifact,
+)
 from notepatch.modules.documents.models.upload import UploadSession
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
@@ -260,6 +264,11 @@ class UploadService:
                 )
         elif not self.settings.clamav_enabled and self.settings.auto_learning_pipeline:
             LearningWorkflowService(self.db, self.storage).schedule_after_upload(document)
+            if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
+                document.status = "ready"
+                self.db.commit()
+                self.db.refresh(document)
+
         return document
 
     def fail_or_cancel_upload(self, upload_session: UploadSession, status_value: str) -> None:

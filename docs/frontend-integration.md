@@ -266,7 +266,7 @@ type UploadSessionResponse = {
     mime_type: string | null;
     file_size: number | null;
     file_type: "image" | "pdf" | "docx" | "pptx" | "audio" | "video" | "other";
-    document_kind: "homework" | "corrected_homework" | "courseware" | "note" | "exam" | "other";
+    document_kind: "homework" | "corrected_homework" | "courseware" | "note" | "exam" | "answer_key" | "rubric" | "chat_attachment" | "other";
     bucket: string;
     object_key: string;
   };
@@ -602,6 +602,11 @@ async function listChatMessages(workspaceId: string, conversationId: string) {
 
 
 附件必须先通过 tusd 文档上传流程完成，聊天只提交 `document_id`。不要把 base64、对象键、客户端路径、文件名或 MIME 当作可信附件来源。消息列表返回的 `attachments` 用于重建聊天气泡；需要显示原图时，再通过该 document 的鉴权 download-url 获取短期 URL。启用历史后，后端会在每轮任务中把历史附件映射到新的 OpenClaw task snapshot，因此客户端无需重复上传同一张图。
+
+AI 助手中的图片或文件必须以 `document_kind: "chat_attachment"` 创建上传会话；它只执行安全扫描并供 OpenClaw 读取，不触发 OCR、知识库、电子笔记、评分或闪卡。为兼容旧客户端，`other` 也不再自动进入学习流水线。真正的学习资料必须显式选择 `courseware`、`note`、`homework`、`corrected_homework` 或 `exam`。
+
+不要在聊天附件上传完成后调用 `/documents/{document_id}/process`。服务端会对 `chat_attachment` 返回 `409`，防止客户端误操作。
+
 可用接口：
 
 ```http

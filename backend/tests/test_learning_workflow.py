@@ -387,3 +387,47 @@ def test_grading_without_study_note_skips_highlight_task(client, db_sessionmaker
             ) is None
     finally:
         settings.auto_learning_pipeline = old_auto
+
+def test_chat_attachments_and_other_uploads_skip_automatic_learning(
+    client, db_sessionmaker, fake_storage
+):
+    settings, old_auto = _set_auto_learning(True)
+    try:
+        user = register_user(client, "chat-attachment-routing@example.com")
+        workspace_id = first_workspace_id(client, user["access_token"])
+        uploads = [
+            _create_and_complete_document(
+                client,
+                fake_storage,
+                user["access_token"],
+                workspace_id,
+                filename=f"{document_kind}.png",
+                document_kind=document_kind,
+            )
+            for document_kind in ("chat_attachment", "other")
+        ]
+
+        assert {upload["document"]["status"] for upload in uploads} == {"ready"}
+        document_ids = {upload["document"]["id"] for upload in uploads}
+        with db_sessionmaker() as db:
+            assert db.scalar(
+                select(LearningUnit).where(LearningUnit.workspace_id == workspace_id)
+            ) is None
+            pipelines = db.scalars(
+                select(Task).where(
+                    Task.workspace_id == workspace_id,
+                    Task.task_type == "document_processing_pipeline",
+                    Task.resource_id.in_(document_ids),
+                )
+            ).all()
+            assert pipelines == []
+
+        blocked = client.post(
+            f"/api/v1/workspaces/{workspace_id}/documents/{uploads[0]['document']['id']}/process",
+            headers=auth_headers(user["access_token"]),
+            json={"options": {}},
+        )
+        assert blocked.status_code == 409
+        assert "cannot enter the learning pipeline" in blocked.json()["detail"]
+    finally:
+        settings.auto_learning_pipeline = old_auto
