@@ -79,23 +79,21 @@ def process_openclaw_chat(
     prompt = task.payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise PermanentTaskError("Chat prompt is required")
+    input_payload = dict(task.payload.get("input") or {})
     citations = []
     has_vectors = db.scalar(
         select(KnowledgeChunk.id)
         .where(KnowledgeChunk.workspace_id == task.workspace_id, KnowledgeChunk.embedding.is_not(None))
         .limit(1)
     )
-    if has_vectors is not None:
+    should_retrieve_knowledge = _should_retrieve_knowledge(input_payload)
+    if has_vectors is not None and should_retrieve_knowledge:
         tasks.ensure_active(task)
         citations = KnowledgeService(db, embedding_client).search(
             workspace_id=task.workspace_id,
             query=prompt,
-            learning_unit_id=(task.payload.get("input") or {}).get("learning_unit_id")
-            if isinstance(task.payload.get("input"), dict)
-            else None,
-            subject=(task.payload.get("input") or {}).get("subject")
-            if isinstance(task.payload.get("input"), dict)
-            else None,
+            learning_unit_id=input_payload.get("learning_unit_id"),
+            subject=input_payload.get("subject"),
             limit=get_settings().knowledge_search_limit,
             owner=f"task:{task.id}:chat-rag",
         )
@@ -108,7 +106,15 @@ def process_openclaw_chat(
             data={"matches": len(citations), "chunk_ids": [item["id"] for item in citations]},
         )
         db.commit()
-    input_payload = dict(task.payload.get("input") or {})
+    elif not should_retrieve_knowledge:
+        tasks.add_event(
+            task,
+            "knowledge_retrieval_skipped",
+            "Knowledge retrieval skipped for attachment-focused chat",
+            progress=20,
+            data={"reason": "attachment_focused_query"},
+        )
+        db.commit()
     chat_service = ChatService(db)
     document_contexts = runtime.get("document_contexts") or {}
     if "attachments" in input_payload:
@@ -140,6 +146,7 @@ def process_openclaw_chat(
         "documents_index_path": runtime["documents_index_path"],
         "documents_root_path": runtime["documents_root_path"],
         "task_output_path": runtime["task_output_path"],
+        "host_task_input_dir": runtime["host_task_input_dir"],
         "host_task_output_dir": runtime["host_task_output_dir"],
         "session_key": f"notepatch:{task.workspace_id}:chat:{task.payload.get('conversation_id') or task.id}",
     }
@@ -188,6 +195,18 @@ def process_openclaw_chat(
             "output_keys": output_keys,
             "citations": result_citations,
         },
+    )
+
+
+def _should_retrieve_knowledge(input_payload: dict) -> bool:
+    attachments = input_payload.get("attachments")
+    has_attachments = isinstance(attachments, list) and bool(attachments)
+    if not has_attachments:
+        return True
+    return (
+        input_payload.get("use_knowledge_base") is True
+        or bool(input_payload.get("learning_unit_id"))
+        or bool(input_payload.get("subject"))
     )
 
 

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
+import base64
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import time
 
@@ -150,7 +151,12 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         if context_note:
             user_content = f"{user_content}\n\n{context_note}"
 
-        messages[current_user_index] = {"role": "user", "content": user_content}
+        image_parts = self._image_parts(input_payload, runtime)
+        message_content: str | list[dict] = user_content
+        if image_parts:
+            message_content = [{"type": "text", "text": user_content}, *image_parts]
+
+        messages[current_user_index] = {"role": "user", "content": message_content}
         return {
             "model": model,
             "stream": False,
@@ -172,6 +178,65 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
                 continue
             messages.append({"role": role, "content": content.strip()})
         return messages
+
+    @staticmethod
+    def _image_parts(input_payload: object, runtime: dict) -> list[dict]:
+        if not isinstance(input_payload, dict):
+            return []
+        attachments = input_payload.get("attachments")
+        if not isinstance(attachments, list):
+            return []
+        images = [
+            item
+            for item in attachments
+            if isinstance(item, dict)
+            and item.get("file_type") == "image"
+            and isinstance(item.get("original_path"), str)
+        ]
+        if not images:
+            return []
+        if len(images) > 8:
+            raise OpenClawRunnerError("A chat request can include at most 8 image attachments")
+
+        host_input_dir = runtime.get("host_task_input_dir")
+        container_documents_root = runtime.get("documents_root_path")
+        if not isinstance(host_input_dir, str) or not isinstance(container_documents_root, str):
+            raise OpenClawRunnerError("OpenClaw image attachment runtime paths are unavailable")
+
+        host_documents_root = (Path(host_input_dir) / "documents").resolve()
+        container_root = PurePosixPath(container_documents_root)
+        parts: list[dict] = []
+        total_bytes = 0
+        allowed_mime_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+        for item in images:
+            mime_type = item.get("mime_type")
+            if mime_type not in allowed_mime_types:
+                raise OpenClawRunnerError(f"Unsupported chat image MIME type: {mime_type}")
+            try:
+                relative_path = PurePosixPath(item["original_path"]).relative_to(container_root)
+            except ValueError as exc:
+                raise OpenClawRunnerError("Chat image path is outside the task document snapshot") from exc
+            image_path = (host_documents_root / Path(*relative_path.parts)).resolve()
+            if not image_path.is_relative_to(host_documents_root):
+                raise OpenClawRunnerError("Chat image path escapes the task document snapshot")
+            if not image_path.is_file():
+                raise OpenClawRunnerError(f"Chat image snapshot is missing: {item.get('document_id')}")
+
+            image_bytes = image_path.read_bytes()
+            if len(image_bytes) > 10 * 1024 * 1024:
+                raise OpenClawRunnerError("A chat image exceeds the 10 MB gateway limit")
+            total_bytes += len(image_bytes)
+            if total_bytes > 20 * 1024 * 1024:
+                raise OpenClawRunnerError("Chat images exceed the 20 MB gateway request limit")
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+                }
+            )
+        return parts
+
 
     @staticmethod
     def _current_user_message_index(messages: list[dict[str, str]], prompt: str) -> int | None:

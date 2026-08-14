@@ -1,3 +1,4 @@
+import base64
 import json
 
 import httpx
@@ -272,3 +273,54 @@ def test_gateway_runner_waits_for_gateway_health(openclaw_settings):
 
 def test_get_openclaw_runner_is_always_gateway(openclaw_settings):
     assert isinstance(get_openclaw_runner(), OpenClawGatewayRunner)
+
+
+def test_gateway_runner_sends_current_image_attachment_as_multimodal_input(
+    openclaw_settings, tmp_path
+):
+    captured: dict = {}
+    image_bytes = b"not-a-real-jpeg-but-stable-test-bytes"
+    host_input_dir = tmp_path / "task-input"
+    image_path = host_input_dir / "documents" / "doc-1" / "original" / "photo.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(image_bytes)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "a waterfall"}}]})
+
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    runner.run_task(
+        "workspace-1",
+        "task-1",
+        {
+            "prompt": "What is in this image?",
+            "input": {
+                "attachments": [
+                    {
+                        "document_id": "doc-1",
+                        "file_type": "image",
+                        "mime_type": "image/jpeg",
+                        "original_path": (
+                            "/workspace/notepatch/openclaw/tasks/task-1/input/"
+                            "documents/doc-1/original/photo.jpg"
+                        ),
+                    }
+                ]
+            },
+            "_openclaw": {
+                "host_task_input_dir": str(host_input_dir),
+                "documents_root_path": (
+                    "/workspace/notepatch/openclaw/tasks/task-1/input/documents"
+                ),
+            },
+        },
+    )
+
+    content = captured["body"]["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "What is in this image?" in content[0]["text"]
+    image_url = content[1]["image_url"]["url"]
+    prefix = "data:image/jpeg;base64,"
+    assert image_url.startswith(prefix)
+    assert base64.b64decode(image_url.removeprefix(prefix)) == image_bytes

@@ -3,6 +3,7 @@ from pathlib import Path
 from notepatch.platform.config import get_settings
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.ai.services.gateway import OpenClawRunner
+from notepatch.modules.ai.services.task_handler import _should_retrieve_knowledge
 from notepatch.modules.tasks.services.executor import process_task
 from tests.conftest import auth_headers, first_workspace_id, register_user
 
@@ -183,3 +184,22 @@ def test_chat_creates_openclaw_task_and_legacy_routes_are_removed(client):
         json={"message": "legacy", "subject": "math"},
     )
     assert old_payload.status_code == 422
+
+
+def test_attachment_focused_chat_skips_knowledge_retrieval_by_default():
+    attachment = {"document_id": "doc-1", "file_type": "image"}
+
+    assert _should_retrieve_knowledge({}) is True
+    assert _should_retrieve_knowledge({"attachments": [attachment]}) is False
+    assert (
+        _should_retrieve_knowledge(
+            {"attachments": [attachment], "use_knowledge_base": True}
+        )
+        is True
+    )
+    assert (
+        _should_retrieve_knowledge(
+            {"attachments": [attachment], "learning_unit_id": "unit-1"}
+        )
+        is True
+    )
