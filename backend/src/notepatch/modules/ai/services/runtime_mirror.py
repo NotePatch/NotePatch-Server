@@ -24,8 +24,9 @@ class OpenClawRuntimeMirror:
         storage: StorageService,
         workspace_id: str,
         task_id: str,
+        model_ids: tuple[str, ...] | None = None,
     ) -> dict:
-        runtime = self.runtime_for_workspace(db, workspace_id)
+        runtime = self.runtime_for_workspace(db, workspace_id, model_ids=model_ids)
         user_id = runtime["user_id"]
         documents_root = self.task_documents_root(user_id, task_id)
         if documents_root.exists():

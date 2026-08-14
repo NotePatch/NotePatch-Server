@@ -12,7 +12,9 @@ class RuntimeStub:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def sync_workspace_documents(self, *, db, storage, workspace_id, task_id):
+    def sync_workspace_documents(
+        self, *, db, storage, workspace_id, task_id, model_ids=None
+    ):
         task_root = self.root / task_id
         input_dir = task_root / "input"
         output_dir = task_root / "output"

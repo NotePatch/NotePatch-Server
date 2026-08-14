@@ -50,6 +50,7 @@ def process_openclaw_chat(
         storage=storage,
         workspace_id=task.workspace_id,
         task_id=task.id,
+        model_ids=(provider_model,),
     )
     task.payload = {
         **(task.payload or {}),

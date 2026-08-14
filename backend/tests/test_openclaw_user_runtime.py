@@ -186,7 +186,10 @@ def test_openclaw_runtime_writes_openai_base_url_from_env(client):
         user_id = user["user"]["id"]
         config = json.loads(OpenClawUserRuntimeService().openclaw_json_path(user_id).read_text(encoding="utf-8"))
         assert config["models"]["providers"]["openai"]["baseUrl"] == "https://proxy.example.com/v1"
-        assert config["models"]["providers"]["openai"]["models"] == []
+        model_id = settings.openclaw_agent_model.removeprefix("openai/")
+        assert config["models"]["providers"]["openai"]["models"] == [
+            {"id": model_id, "name": model_id, "input": ["text", "image"]}
+        ]
         assert "OPENAI_API_KEY" not in json.dumps(config)
     finally:
         settings.openai_base_url = old_base_url
@@ -205,7 +208,7 @@ def test_openclaw_runtime_removes_openai_base_url_when_env_is_empty(client, db_s
         ]["baseUrl"] == "https://proxy.example.com/v1"
         assert json.loads(service.openclaw_json_path(user_id).read_text(encoding="utf-8"))["models"]["providers"][
             "openai"
-        ]["models"] == []
+        ]["models"][0]["input"] == ["text", "image"]
 
         settings.openai_base_url = None
         with db_sessionmaker() as db:

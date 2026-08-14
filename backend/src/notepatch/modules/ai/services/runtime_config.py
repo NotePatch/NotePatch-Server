@@ -58,11 +58,16 @@ class OpenClawRuntimeConfig:
         )
         return token
 
-    def _ensure_openclaw_json(self, user_id: str, *, user, workspace) -> None:
+    def _ensure_openclaw_json(
+        self, user_id: str, *, user, workspace, model_ids: tuple[str, ...] | None = None
+    ) -> None:
         models: dict = {}
         base_url = (self.settings.openai_base_url or "").strip()
+        model_definitions = self._openai_model_definitions(user, model_ids)
         if base_url:
-            models = {"providers": {"openai": {"baseUrl": base_url, "models": []}}}
+            models = {
+                "providers": {"openai": {"baseUrl": base_url, "models": model_definitions}}
+            }
         replacements = {
             "__WORKSPACE_DIR_JSON__": json.dumps(str(self.workspace_dir(user_id))),
             "__MODEL_JSON__": json.dumps(self.settings.openclaw_agent_model),
@@ -105,6 +110,33 @@ class OpenClawRuntimeConfig:
                 if not providers:
                     payload.pop("models", None)
         self._write_json_if_changed(config_path, payload)
+
+    def _openai_model_definitions(
+        self, user, model_ids: tuple[str, ...] | None
+    ) -> list[dict]:
+        configured = [
+            self.settings.openclaw_agent_model,
+            getattr(user, "preferred_ai_model", None),
+            *(model_ids or ()),
+        ]
+        definitions: list[dict] = []
+        seen: set[str] = set()
+        for model_id in configured:
+            if not isinstance(model_id, str) or not model_id.startswith("openai/"):
+                continue
+            upstream_id = model_id.split("/", 1)[1].strip()
+            if not upstream_id or upstream_id in seen:
+                continue
+            seen.add(upstream_id)
+            definitions.append(
+                {
+                    "id": upstream_id,
+                    "name": upstream_id,
+                    "input": ["text", "image"],
+                }
+            )
+        return definitions
+
 
     def _ensure_auth_profiles(self, user_id: str) -> None:
         payload = json.loads(self._template("auth-profiles.json.template"))

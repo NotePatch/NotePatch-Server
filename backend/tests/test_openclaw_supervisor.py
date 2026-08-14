@@ -213,7 +213,7 @@ def test_supervisor_recreates_gateway_when_openai_base_url_changes(client, db_se
         config_path = OpenClawUserRuntimeService().openclaw_json_path(user_id)
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert config["models"]["providers"]["openai"]["baseUrl"] == "https://proxy.example.com/v1"
-        assert config["models"]["providers"]["openai"]["models"] == []
+        assert config["models"]["providers"]["openai"]["models"][0]["input"] == ["text", "image"]
     finally:
         settings.openai_base_url = old_base_url
 

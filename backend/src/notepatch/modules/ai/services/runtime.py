@@ -42,7 +42,9 @@ class OpenClawUserRuntimeService(
             "Set OPENCLAW_ASSET_ROOT to the monorepo openclaw directory."
         )
 
-    def provision_user(self, user: User, workspace: Workspace) -> dict:
+    def provision_user(
+        self, user: User, workspace: Workspace, *, model_ids: tuple[str, ...] | None = None
+    ) -> dict:
         user_root = self.user_root(user.id)
         shutil.rmtree(self.documents_root(user.id), ignore_errors=True)
         for path in (
@@ -57,7 +59,9 @@ class OpenClawUserRuntimeService(
             path.mkdir(parents=True, exist_ok=True)
 
         token = self._ensure_env(user.id)
-        self._ensure_openclaw_json(user.id, user=user, workspace=workspace)
+        self._ensure_openclaw_json(
+            user.id, user=user, workspace=workspace, model_ids=model_ids
+        )
         self._ensure_auth_profiles(user.id)
         self._ensure_notepatch_skills(user.id)
         self._write_notepatch_runtime(user.id, user=user, workspace=workspace)
@@ -72,14 +76,16 @@ class OpenClawUserRuntimeService(
             "gateway_token": token,
         }
 
-    def runtime_for_workspace(self, db: Session, workspace_id: str) -> dict:
+    def runtime_for_workspace(
+        self, db: Session, workspace_id: str, *, model_ids: tuple[str, ...] | None = None
+    ) -> dict:
         workspace = db.get(Workspace, workspace_id)
         if workspace is None:
             raise OpenClawUserRuntimeError("Workspace not found")
         user = db.get(User, workspace.owner_user_id)
         if user is None:
             raise OpenClawUserRuntimeError("Workspace owner not found")
-        runtime = self.provision_user(user, workspace)
+        runtime = self.provision_user(user, workspace, model_ids=model_ids)
         runtime["user_id"] = user.id
         runtime["workspace_id"] = workspace.id
         return runtime
