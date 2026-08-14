@@ -43,6 +43,7 @@ class ChatMessageRead(ORMModel):
     task_id: str | None = None
     status: str
     error_message: str | None = None
+    attachments: list[dict] = Field(default_factory=list)
     citations: list[dict] = Field(default_factory=list)
     source_status: str = "available"
     model_id: str | None = None

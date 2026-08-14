@@ -40,6 +40,7 @@ class OpenClawRuntimeMirror:
         index_documents: list[dict] = []
         skipped_documents: list[dict] = []
         skipped_artifacts: list[dict] = []
+        document_contexts: dict[str, dict] = {}
         file_count = 0
         for document in documents:
             reason = self._document_skip_reason(document, workspace_id)
@@ -135,6 +136,18 @@ class OpenClawRuntimeMirror:
                     "artifacts": artifact_entries,
                 }
             )
+            document_contexts[document.id] = {
+                "document_id": document.id,
+                "filename": document.original_filename,
+                "title": document.title,
+                "mime_type": document.mime_type,
+                "file_type": document.file_type,
+                "file_size": document.file_size,
+                "status": document.status,
+                "original_path": self._container_workspace_path(user_id, original_path),
+                "ocr_markdown_path": ocr_markdown_path,
+                "ocr_text_path": ocr_text_path,
+            }
 
         task_input_dir = self.task_input_dir(user_id, task_id)
         task_output_dir = self.task_output_dir(user_id, task_id)
@@ -168,6 +181,7 @@ class OpenClawRuntimeMirror:
             "host_task_input_dir": str(task_input_dir),
             "documents_synced": len(index_documents),
             "mirrored_document_ids": [item["id"] for item in index_documents],
+            "document_contexts": document_contexts,
             "files_synced": file_count,
             "documents_skipped": len(skipped_documents),
             "artifacts_skipped": len(skipped_artifacts),

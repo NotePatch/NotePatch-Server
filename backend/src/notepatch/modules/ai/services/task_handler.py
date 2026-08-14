@@ -109,6 +109,13 @@ def process_openclaw_chat(
         )
         db.commit()
     input_payload = dict(task.payload.get("input") or {})
+    chat_service = ChatService(db)
+    document_contexts = runtime.get("document_contexts") or {}
+    if "attachments" in input_payload:
+        input_payload["attachments"] = chat_service.resolve_attachments(
+            input_payload.get("attachments"),
+            document_contexts,
+        )
     input_payload["knowledge_context"] = [
         {
             "chunk_id": item["id"],
@@ -121,7 +128,10 @@ def process_openclaw_chat(
     ]
     payload = dict(task.payload)
     payload["input"] = input_payload
-    payload["conversation_messages"] = ChatService(db).history_for_task(task)
+    payload["conversation_messages"] = chat_service.history_for_task(
+        task,
+        document_contexts=document_contexts,
+    )
     payload["_openclaw"] = {
         "gateway_url": runtime["gateway_url"],
         "gateway_token": runtime["gateway_token"],

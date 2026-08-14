@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from notepatch.modules.documents.models.document import Document
 from notepatch.platform.config import get_settings
 from notepatch.modules.ai.services.gateway import OpenClawRunner
 from notepatch.modules.tasks.services.executor import process_task
@@ -50,6 +51,33 @@ def messages(client, token: str, workspace_id: str, conversation_id: str) -> lis
     )
     assert response.status_code == 200, response.text
     return response.json()["items"]
+
+def create_ready_image(client, db_sessionmaker, fake_storage, token: str, workspace_id: str, filename: str) -> dict:
+    body = b"test image bytes"
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/documents/upload-session",
+        headers=auth_headers(token),
+        json={
+            "filename": filename,
+            "mime_type": "image/jpeg",
+            "file_size": len(body),
+            "document_kind": "note",
+            "title": filename,
+        },
+    )
+    assert response.status_code == 201, response.text
+    upload = response.json()
+    fake_storage.objects[(upload["bucket"], upload["object_key"])] = {
+        "file_size": len(body),
+        "mime_type": "image/jpeg",
+        "metadata": {},
+        "body": body,
+    }
+    with db_sessionmaker() as db:
+        document = db.get(Document, upload["document"]["id"])
+        document.status = "ready"
+        db.commit()
+    return upload
 
 
 def test_chat_creates_history_and_worker_completes_assistant_message(client, db_sessionmaker, fake_storage, tmp_path):
@@ -221,3 +249,99 @@ def test_chat_history_window_is_limited(client, db_sessionmaker, fake_storage, t
         ]
     finally:
         settings.ai_chat_history_message_limit = old_limit
+
+def test_chat_attachments_persist_and_rebind_to_each_task_snapshot(
+    client,
+    db_sessionmaker,
+    fake_storage,
+    tmp_path,
+):
+    user = register_user(client, "chat-attachments@example.com")
+    token = user["access_token"]
+    workspace_id = first_workspace_id(client, token)
+    upload = create_ready_image(
+        client,
+        db_sessionmaker,
+        fake_storage,
+        token,
+        workspace_id,
+        "lesson-photo.jpg",
+    )
+    document_id = upload["document"]["id"]
+
+    first_response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/ai/chat",
+        headers=auth_headers(token),
+        json={
+            "prompt": "这张图里是什么？",
+            "input": {
+                "attachments": [
+                    {
+                        "document_id": document_id,
+                        "filename": "../../spoofed.jpg",
+                        "mime_type": "text/plain",
+                    }
+                ]
+            },
+            "options": {},
+        },
+    )
+    assert first_response.status_code == 201, first_response.text
+    first = first_response.json()
+    conversation_id = first["payload"]["conversation_id"]
+    stored_attachment = messages(client, token, workspace_id, conversation_id)[0]["attachments"][0]
+    assert stored_attachment["document_id"] == document_id
+    assert stored_attachment["filename"] == "lesson-photo.jpg"
+    assert stored_attachment["mime_type"] == "image/jpeg"
+
+    runner = RecordingRunner(tmp_path)
+    with db_sessionmaker() as db:
+        process_task(db, first["id"], storage=fake_storage, openclaw_runner=runner)
+    current_attachment = runner.payloads[-1]["input"]["attachments"][0]
+    assert current_attachment["availability"] == "available"
+    assert first["id"] in current_attachment["original_path"]
+    assert current_attachment["original_path"].endswith("/original/lesson-photo.jpg")
+
+    second = create_chat(client, token, workspace_id, "继续解释这张图", conversation_id)
+    with db_sessionmaker() as db:
+        process_task(db, second["id"], storage=fake_storage, openclaw_runner=runner)
+
+    historical_user_message = runner.payloads[-1]["conversation_messages"][0]["content"]
+    assert "NotePatch attachments referenced by this message:" in historical_user_message
+    assert document_id in historical_user_message
+    assert second["id"] in historical_user_message
+    assert first["id"] not in historical_user_message
+    persisted = messages(client, token, workspace_id, conversation_id)
+    assert persisted[0]["attachments"][0]["document_id"] == document_id
+
+
+def test_chat_attachment_document_is_strictly_workspace_scoped(
+    client,
+    db_sessionmaker,
+    fake_storage,
+):
+    alice = register_user(client, "chat-attachment-alice@example.com")
+    bob = register_user(client, "chat-attachment-bob@example.com")
+    alice_workspace_id = first_workspace_id(client, alice["access_token"])
+    bob_workspace_id = first_workspace_id(client, bob["access_token"])
+    upload = create_ready_image(
+        client,
+        db_sessionmaker,
+        fake_storage,
+        alice["access_token"],
+        alice_workspace_id,
+        "alice-private.jpg",
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{bob_workspace_id}/ai/chat",
+        headers=auth_headers(bob["access_token"]),
+        json={
+            "prompt": "读取这张图",
+            "input": {"attachments": [{"document_id": upload["document"]["id"]}]},
+            "options": {},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Attachment document not found"

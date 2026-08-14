@@ -8,7 +8,7 @@ x-backend: &backend
     args:
       RELEASE_REVISION: ${GIT_SHA:-dev}
       RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
-      SCHEMA_REVISION: 202608140001
+      SCHEMA_REVISION: 202608140002
   env_file:
     - path: .env
       required: false
@@ -252,7 +252,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       RESTIC_REPOSITORY: /backups/restic
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
-      SCHEMA_REVISION: 202608140001
+      SCHEMA_REVISION: 202608140002
       RELEASE_REVISION: ${GIT_SHA:-dev}
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups

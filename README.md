@@ -462,6 +462,8 @@ tusd /data volume -> api /tusd-data:ro -> SeaweedFS S3
 
 `POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口，会创建 `openclaw_agent_run` 异步任务。请求体使用 `prompt`、可选 `conversation_id`、可选 `input` 和可选 `options`；不传 `conversation_id` 时会自动创建会话。响应 task payload 包含 conversation 和 message id，客户端通过 task 状态、events 以及会话消息接口获取最终 answer 或失败原因。注册用户时，notepatch 会为该用户生成一套独立 OpenClaw runtime 配置：
 
+聊天图片通过 `input.attachments=[{"document_id":"..."}]` 引用已完成上传的 workspace 文档。后端不信任客户端文件名或 MIME，会按 `workspace_id + document_id` 重新校验并把规范化附件保存到 user message。后续轮次启用历史时，会把附件重新绑定到当前 task 的独立 OpenClaw 快照路径；原图仍以 SeaweedFS 中的 Document 为唯一持久化来源。
+
 聊天历史保存在 PostgreSQL，可通过以下接口管理：
 
 ```text

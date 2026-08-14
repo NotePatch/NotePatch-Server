@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import utcnow
 from notepatch.modules.ai.models.chat import ChatConversation, ChatMessage
+from notepatch.modules.documents.models.document import Document
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.tasks.services.task import TaskService
@@ -39,6 +40,13 @@ class ChatService:
             if conversation_id
             else self._create_conversation(workspace_id=workspace_id, user_id=user.id, prompt=prompt)
         )
+        normalized_input = dict(input_payload)
+        attachments = self._normalize_attachments(
+            workspace_id=workspace_id,
+            raw_attachments=normalized_input.get("attachments"),
+        )
+        if "attachments" in normalized_input:
+            normalized_input["attachments"] = attachments
         now = utcnow()
         user_message = ChatMessage(
             workspace_id=workspace_id,
@@ -47,6 +55,7 @@ class ChatService:
             role="user",
             content=prompt.strip(),
             status="succeeded",
+            attachments=attachments,
         )
         assistant_message = ChatMessage(
             workspace_id=workspace_id,
@@ -67,7 +76,7 @@ class ChatService:
             resource_id=conversation.id,
             payload={
                 "prompt": prompt.strip(),
-                "input": input_payload,
+                "input": normalized_input,
                 "options": options,
                 "conversation_id": conversation.id,
                 "user_message_id": user_message.id,
@@ -151,7 +160,12 @@ class ChatService:
         )
         self.db.commit()
 
-    def history_for_task(self, task: Task) -> list[dict[str, str]]:
+    def history_for_task(
+        self,
+        task: Task,
+        *,
+        document_contexts: dict[str, dict] | None = None,
+    ) -> list[dict[str, str]]:
         conversation_id = task.payload.get("conversation_id") if isinstance(task.payload, dict) else None
         if not isinstance(conversation_id, str):
             return []
@@ -184,11 +198,40 @@ class ChatService:
             .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .limit(self.settings.ai_chat_history_message_limit)
         ).all()
-        return [
-            {"role": message.role, "content": message.content}
-            for message in reversed(messages)
-            if message.content.strip()
-        ]
+        current_user_message_id = task.payload.get("user_message_id")
+        history: list[dict[str, str]] = []
+        for message in reversed(messages):
+            if not message.content.strip():
+                continue
+            content = message.content
+            if message.role == "user" and message.id != current_user_message_id and message.attachments:
+                content = self._content_with_attachments(
+                    content,
+                    self.resolve_attachments(message.attachments, document_contexts or {}),
+                )
+            history.append({"role": message.role, "content": content})
+        return history
+
+    @staticmethod
+    def resolve_attachments(attachments: object, document_contexts: dict[str, dict]) -> list[dict]:
+        if not isinstance(attachments, list):
+            return []
+        resolved: list[dict] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            document_id = item.get("document_id")
+            if not isinstance(document_id, str):
+                continue
+            context = document_contexts.get(document_id)
+            merged = dict(item)
+            if context is None:
+                merged["availability"] = "unavailable"
+            else:
+                merged.update(context)
+                merged["availability"] = "available"
+            resolved.append(merged)
+        return resolved
 
     def mark_assistant_running(self, task: Task) -> None:
         message = self._assistant_message_for_task(task)
@@ -256,6 +299,80 @@ class ChatService:
         self.db.add(conversation)
         self.db.flush()
         return conversation
+
+    def _normalize_attachments(self, *, workspace_id: str, raw_attachments: object) -> list[dict]:
+        if raw_attachments is None:
+            return []
+        if not isinstance(raw_attachments, list):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="input.attachments must be a list",
+            )
+        if len(raw_attachments) > 20:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A chat message can reference at most 20 attachments",
+            )
+        document_ids: list[str] = []
+        for item in raw_attachments:
+            document_id = item.get("document_id") if isinstance(item, dict) else None
+            if not isinstance(document_id, str) or not document_id.strip():
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Each attachment must contain document_id",
+                )
+            normalized_id = document_id.strip()
+            if normalized_id not in document_ids:
+                document_ids.append(normalized_id)
+        if not document_ids:
+            return []
+        documents = self.db.scalars(
+            select(Document).where(
+                Document.workspace_id == workspace_id,
+                Document.id.in_(document_ids),
+                Document.status.in_(("uploaded", "ready")),
+            )
+        ).all()
+        by_id = {document.id: document for document in documents}
+        if any(document_id not in by_id for document_id in document_ids):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment document not found")
+        return [self._attachment_from_document(by_id[document_id]) for document_id in document_ids]
+
+    @staticmethod
+    def _attachment_from_document(document: Document) -> dict:
+        return {
+            "document_id": document.id,
+            "filename": document.original_filename,
+            "title": document.title,
+            "mime_type": document.mime_type,
+            "file_type": document.file_type,
+            "file_size": document.file_size,
+            "status": document.status,
+            "availability": "available",
+        }
+
+    @staticmethod
+    def _content_with_attachments(content: str, attachments: list[dict]) -> str:
+        if not attachments:
+            return content
+        lines = [content, "", "NotePatch attachments referenced by this message:"]
+        for item in attachments:
+            label = item.get("filename") or item.get("title") or item.get("document_id")
+            line = (
+                f"- {label} (document_id={item.get('document_id')}, "
+                f"availability={item.get('availability')})"
+            )
+            original_path = item.get("original_path")
+            if isinstance(original_path, str) and original_path:
+                line += f"\n  original: {original_path}"
+            ocr_markdown_path = item.get("ocr_markdown_path")
+            if isinstance(ocr_markdown_path, str) and ocr_markdown_path:
+                line += f"\n  OCR markdown: {ocr_markdown_path}"
+            ocr_text_path = item.get("ocr_text_path")
+            if isinstance(ocr_text_path, str) and ocr_text_path:
+                line += f"\n  OCR text: {ocr_text_path}"
+            lines.append(line)
+        return "\n".join(lines)
 
     @staticmethod
     def _safe_citation(item: dict) -> dict:

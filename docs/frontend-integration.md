@@ -545,6 +545,17 @@ type ChatConversation = {
   updated_at: string;
 };
 
+type ChatAttachment = {
+  document_id: string;
+  filename: string;
+  title: string | null;
+  mime_type: string | null;
+  file_type: string;
+  file_size: number | null;
+  status: string;
+  availability: "available" | "unavailable";
+};
+
 type ChatMessage = {
   id: string;
   conversation_id: string;
@@ -553,15 +564,26 @@ type ChatMessage = {
   task_id: string | null;
   status: "queued" | "running" | "succeeded" | "failed";
   error_message: string | null;
+  attachments: ChatAttachment[];
   citations: Array<{ chunk_id?: string; document_id?: string; score?: number; metadata?: object }>;
   source_status: "available" | "partially_unavailable" | "unavailable";
   created_at: string;
 };
 
-async function sendChat(workspaceId: string, prompt: string, conversationId?: string) {
+async function sendChat(
+  workspaceId: string,
+  prompt: string,
+  conversationId?: string,
+  attachmentDocumentIds: string[] = [],
+) {
   return apiFetch<Task>(`/workspaces/${workspaceId}/ai/chat`, {
     method: "POST",
-    body: JSON.stringify({ prompt, conversation_id: conversationId, input: {}, options: {} }),
+    body: JSON.stringify({
+      prompt,
+      conversation_id: conversationId,
+      input: { attachments: attachmentDocumentIds.map((document_id) => ({ document_id })) },
+      options: {},
+    }),
   });
 }
 
@@ -578,6 +600,8 @@ async function listChatMessages(workspaceId: string, conversationId: string) {
 }
 ```
 
+
+附件必须先通过 tusd 文档上传流程完成，聊天只提交 `document_id`。不要把 base64、对象键、客户端路径、文件名或 MIME 当作可信附件来源。消息列表返回的 `attachments` 用于重建聊天气泡；需要显示原图时，再通过该 document 的鉴权 download-url 获取短期 URL。启用历史后，后端会在每轮任务中把历史附件映射到新的 OpenClaw task snapshot，因此客户端无需重复上传同一张图。
 可用接口：
 
 ```http
