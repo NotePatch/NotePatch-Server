@@ -27,6 +27,7 @@ class FakeStorage:
     document_processed_key = staticmethod(StorageService.document_processed_key)
     sandbox_input_key = staticmethod(StorageService.sandbox_input_key)
     sandbox_output_key = staticmethod(StorageService.sandbox_output_key)
+    user_avatar_key = staticmethod(StorageService.user_avatar_key)
     learning_unit_note_key = staticmethod(StorageService.learning_unit_note_key)
     filename_for_object_key = staticmethod(StorageService.filename_for_object_key)
 
@@ -263,6 +264,8 @@ def client(
     old_admin_emails = settings.admin_emails
     old_auto_learning_pipeline = settings.auto_learning_pipeline
     old_clamav_enabled = settings.clamav_enabled
+    old_public_api_base_url = settings.public_api_base_url
+    old_public_path_prefix = settings.public_path_prefix
     settings.tusd_data_dir = str(tmp_path)
     settings.openclaw_user_runtime_root = str(tmp_path / "openclaw-users")
     settings.openai_api_key = None
@@ -273,6 +276,8 @@ def client(
     settings.admin_emails = ""
     settings.auto_learning_pipeline = False
     settings.clamav_enabled = False
+    settings.public_api_base_url = ""
+    settings.public_path_prefix = ""
     from tests.fakes import FakeEmbeddingClient, FakeSkillRunner, fake_ocr_pipeline
 
     monkeypatch.setattr("notepatch.modules.tasks.services.executor.OcrPipeline", fake_ocr_pipeline)
@@ -310,6 +315,8 @@ def client(
     settings.admin_emails = old_admin_emails
     settings.auto_learning_pipeline = old_auto_learning_pipeline
     settings.clamav_enabled = old_clamav_enabled
+    settings.public_api_base_url = old_public_api_base_url
+    settings.public_path_prefix = old_public_path_prefix
 
 
 def auth_headers(access_token: str) -> dict[str, str]:

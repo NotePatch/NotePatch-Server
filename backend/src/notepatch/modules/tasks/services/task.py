@@ -11,6 +11,7 @@ from notepatch.platform.database import utcnow
 from notepatch.modules.tasks.models.task import TASK_TYPES, Task, TaskEvent
 from notepatch.platform.errors import TaskCancelledError
 from notepatch.platform.metrics import observe_task
+from notepatch.modules.tasks.services.cancellation import signal_task_cancellation
 from notepatch.modules.tasks.services.queue import queue_name_for_task_type, redis_key_for_queue, retry_key_for_queue
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,7 @@ class TaskService:
                 data={"reason": reason},
             )
         task.updated_at = now
+        signal_task_cancellation(task.id)
         self._remove_from_redis(task)
         if commit:
             self.db.commit()

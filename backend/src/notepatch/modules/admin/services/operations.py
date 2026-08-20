@@ -16,6 +16,7 @@ from notepatch.modules.identity.models.user import RefreshToken, User
 from notepatch.modules.identity.models.workspace import Workspace, WorkspaceMember
 from notepatch.modules.identity.services.permissions import get_role, seed_roles_and_permissions
 from notepatch.modules.identity.services.presence import PresenceService
+from notepatch.modules.identity.services.profile import AvatarService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.config import get_settings
@@ -115,6 +116,7 @@ class AdminOperationsService:
 
     def update_user(self, actor: User, target: User, fields: dict) -> User:
         before = user_snapshot(target)
+        old_email = target.email
         if target.id == actor.id and fields.get("is_active") is False:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Administrators cannot disable themselves")
         if fields.get("is_active") is False:
@@ -134,6 +136,12 @@ class AdminOperationsService:
                 if name == "email" and isinstance(value, str):
                     value = value.lower().strip()
                 setattr(target, name, value)
+        profile_fields = {"email", "full_name", "username", "phone"}
+        if profile_fields.intersection(fields):
+            target.profile_version += 1
+        if target.email != old_email:
+            target.auth_version += 1
+            self._revoke_tokens(target.id)
         if fields.get("is_active") is False:
             self._revoke_tokens(target.id)
             self._clear_presence(target.id)
@@ -146,6 +154,7 @@ class AdminOperationsService:
         temporary_password = secrets.token_urlsafe(15)
         target.password_hash = hash_password(temporary_password)
         target.must_change_password = True
+        target.auth_version += 1
         self._revoke_tokens(target.id)
         self.audit(
             actor,
@@ -306,6 +315,7 @@ class UserPurgeExecutor:
             self.db.commit()
             self.db.delete(workspace)
             self.db.flush()
+        AvatarService(self.db, self.storage).purge_user_avatar(user)
         self.db.delete(user)
         self.db.commit()
         return self._finish(operation, {"user_id": target_user_id, "purged": True})

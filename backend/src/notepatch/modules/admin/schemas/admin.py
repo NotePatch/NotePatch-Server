@@ -12,6 +12,8 @@ class AdminUserRead(BaseModel):
     is_active: bool
     must_change_password: bool
     ai_history_enabled: bool
+    avatar_url: str | None = None
+    profile_version: int = 1
     created_at: datetime
 
 
@@ -59,6 +61,9 @@ class AdminDocumentListItem(BaseModel):
     file_size: int | None = None
     file_type: str
     document_kind: str
+    retention_scope: str = "workspace"
+    chat_conversation_id: str | None = None
+    save_to_documents: bool = True
     status: str
     artifacts_count: int = 0
     created_at: datetime

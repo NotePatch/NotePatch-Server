@@ -147,7 +147,7 @@ def test_supervisor_is_idempotent_for_running_matching_container(client, db_sess
     assert {path: path.stat().st_mtime_ns for path in watched_mtimes} == watched_mtimes
 
 
-def test_supervisor_recreates_gateway_when_runtime_config_hash_changes(client, db_sessionmaker):
+def test_supervisor_does_not_recreate_gateway_for_hot_runtime_config_change(client, db_sessionmaker):
     user_id, _workspace_id = _registered_user_and_workspace(client, db_sessionmaker, "supervisor-recreate@example.com")
     docker_client = FakeDockerClient()
     presence = PresenceService(redis_client=FakeRedis())
@@ -162,8 +162,8 @@ def test_supervisor_recreates_gateway_when_runtime_config_hash_changes(client, d
     config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     _run_supervisor_once(db_sessionmaker, presence, docker_client)
 
-    assert first_container.removed is True
-    assert len(docker_client.containers.run_calls) == 2
+    assert first_container.removed is False
+    assert len(docker_client.containers.run_calls) == 1
 
 
 def test_supervisor_ignores_gateway_managed_config_fields(client, db_sessionmaker):

@@ -111,6 +111,8 @@ export type Conversation = {
   workspace_id: string;
   user_id: string;
   title: string;
+  title_source: "prompt" | "ai" | "manual";
+  title_generated_at?: string | null;
   last_message_at?: string | null;
   created_at: string;
   updated_at: string;
@@ -189,6 +191,9 @@ export type AdminDocument = {
   file_size?: number | null;
   file_type: string;
   document_kind: string;
+  retention_scope: "workspace" | "conversation";
+  chat_conversation_id?: string | null;
+  save_to_documents: boolean;
   status: string;
   artifacts_count: number;
   created_at: string;

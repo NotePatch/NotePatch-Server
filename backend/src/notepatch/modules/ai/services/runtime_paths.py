@@ -138,19 +138,28 @@ class OpenClawRuntimePaths:
         for root in selected_roots:
             self._chown_tree(root)
 
+    def _ensure_runtime_entry_permissions(self, paths: Iterable[Path]) -> None:
+        for path in paths:
+            self._chown_path(path)
+
     def _chown_tree(self, root: Path) -> None:
         if not root.exists():
             return
         for path in (root, *root.rglob("*")):
-            try:
-                os.chown(
-                    path,
-                    self.settings.openclaw_user_runtime_uid,
-                    self.settings.openclaw_user_runtime_gid,
-                    follow_symlinks=False,
-                )
-            except (AttributeError, PermissionError, OSError):
-                continue
+            self._chown_path(path)
+
+    def _chown_path(self, path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            os.chown(
+                path,
+                self.settings.openclaw_user_runtime_uid,
+                self.settings.openclaw_user_runtime_gid,
+                follow_symlinks=False,
+            )
+        except (AttributeError, PermissionError, OSError):
+            return
 
     def _provider_environment(self) -> dict[str, str]:
         values = {

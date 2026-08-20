@@ -18,6 +18,7 @@ TASK_TYPES = {
     "openclaw_agent_run",
     "document_processing_pipeline",
     "purge_document",
+    "purge_avatar_object",
     "purge_user",
     "scan_document",
     "merge_learning_units",

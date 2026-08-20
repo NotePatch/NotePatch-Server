@@ -15,7 +15,12 @@ from notepatch.platform.storage import StorageService
 
 def queue_statuses() -> list[AdminQueueStatus]:
     settings = get_settings()
-    names = [settings.default_queue_name, settings.ocr_queue_name, settings.chat_queue_name]
+    names = [
+        settings.default_queue_name,
+        settings.ocr_queue_name,
+        settings.chat_queue_name,
+        settings.ai_queue_name,
+    ]
     try:
         client = redis.from_url(
             settings.redis_url,

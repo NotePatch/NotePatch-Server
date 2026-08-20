@@ -6,6 +6,7 @@ import pytest
 
 from notepatch.platform.config import get_settings
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunnerError, get_openclaw_runner
+from notepatch.platform.errors import TaskCancelledError
 
 
 @pytest.fixture
@@ -82,6 +83,83 @@ def test_gateway_runner_posts_chat_completion_and_writes_output(openclaw_setting
 
     output = tmp_path / "workspaces" / "workspace-1" / "tasks" / "task-1" / "output" / "result.json"
     assert json.loads(output.read_text(encoding="utf-8"))["answer"] == "答案来了"
+
+
+def test_gateway_runner_streams_answer_and_reasoning_summary(openclaw_settings):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            content=(
+                'data: {"choices":[{"delta":{"reasoning_content":"Plan: inspect the image."}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"It is a waterfall."}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    events: list[tuple[str, str]] = []
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = runner.run_chat_task(
+        "workspace-1",
+        "task-stream",
+        {
+            "prompt": "Describe the picture",
+            "input": {},
+            "options": {"thinking": {"enabled": True, "effort": "low"}, "temperature": 0.65},
+            "ai_model": "openai/gpt-5.4",
+        },
+        on_stream_event=lambda stream, delta: events.append((stream, delta)),
+    )
+
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["reasoning_effort"] == "low"
+    assert captured["body"]["reasoning_mode"] == "stream"
+    assert captured["body"]["temperature"] == 0.65
+    assert events == [
+        ("reasoning", "Plan: inspect the image."),
+        ("answer", "It is a waterfall."),
+    ]
+    assert result["answer"] == "It is a waterfall."
+    assert result["reasoning_summary"] == "Plan: inspect the image."
+
+
+def test_gateway_runner_surfaces_structured_stream_error(openclaw_settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                'data: {"error":{"message":"Sandbox mode requires Docker, but the docker command was not found",'
+                '"type":"api_error"}}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    with pytest.raises(OpenClawRunnerError, match="Sandbox mode requires Docker"):
+        runner.run_chat_task(
+            "workspace-1",
+            "task-stream-error",
+            {"prompt": "hello", "input": {}, "options": {}},
+        )
+
+
+def test_gateway_runner_stops_before_stream_when_cancelled(openclaw_settings):
+    runner = OpenClawGatewayRunner(
+        client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    )
+
+    with pytest.raises(TaskCancelledError):
+        runner.run_chat_task(
+            "workspace-1",
+            "task-cancelled",
+            {"prompt": "hello", "input": {}, "options": {}},
+            is_cancel_requested=lambda: True,
+        )
 
 
 def test_gateway_runner_can_use_user_runtime_context(openclaw_settings, tmp_path):
@@ -187,6 +265,44 @@ def test_gateway_runner_ignores_provider_model_for_gateway_request(openclaw_sett
     assert captured["provider_model"] == "openai/gpt-5.4"
     assert result["model"] == "openclaw"
     assert result["provider_model"] == "openai/gpt-5.4"
+
+
+def test_gateway_runner_generates_title_in_isolated_session(openclaw_settings):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["session_key"] = request.headers.get("x-openclaw-session-key")
+        captured["provider_model"] = request.headers.get("x-openclaw-model")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "二次函数复习"}}]})
+
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    title = runner.generate_conversation_title(
+        "workspace-1",
+        "conversation-1",
+        [
+            {"role": "user", "content": "请解释二次函数"},
+            {"role": "assistant", "content": "二次函数的一般形式是……"},
+        ],
+        runtime={"gateway_url": "http://user-gateway:18789", "gateway_token": "user-token"},
+        provider_model="openai/gpt-5.4-mini",
+        client_locale="pt-BR",
+        max_length=40,
+        timeout_seconds=12,
+    )
+
+    assert title == "二次函数复习"
+    assert captured["url"] == "http://user-gateway:18789/v1/chat/completions"
+    assert captured["session_key"] == "notepatch:workspace-1:chat-title:conversation-1"
+    assert captured["provider_model"] == "openai/gpt-5.4-mini"
+    assert captured["body"]["model"] == "openclaw"
+    assert captured["body"]["reasoning_effort"] == "none"
+    assert captured["body"]["messages"][0]["role"] == "system"
+    assert "client locale pt-BR" in captured["body"]["messages"][0]["content"]
+    assert "using only user-role messages" in captured["body"]["messages"][0]["content"]
+    assert "not a request to continue or answer" in captured["body"]["messages"][1]["content"]
+    assert "请解释二次函数" in captured["body"]["messages"][1]["content"]
 
 
 

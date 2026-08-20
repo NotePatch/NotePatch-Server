@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from notepatch.shared.schemas import ORMModel, metadata_field
 
@@ -61,6 +61,9 @@ class DocumentRead(ORMModel):
     file_size: int | None = None
     file_type: str
     document_kind: str
+    retention_scope: str = "workspace"
+    chat_conversation_id: str | None = None
+    save_to_documents: bool = True
     storage_backend: str
     bucket: str
     object_key: str
@@ -101,8 +104,15 @@ class UploadSessionRequest(BaseModel):
     mime_type: str | None = Field(default=None, max_length=255)
     file_size: int | None = Field(default=None, ge=0)
     document_kind: DocumentKind = "other"
+    save_to_documents: bool = True
     title: str | None = Field(default=None, max_length=255)
     metadata: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_retention_scope(self):
+        if not self.save_to_documents and self.document_kind != "chat_attachment":
+            raise ValueError("save_to_documents=false is only valid for chat_attachment uploads")
+        return self
 
 
 class UploadSessionResponse(BaseModel):

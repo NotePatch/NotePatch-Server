@@ -25,6 +25,7 @@ class OpenClawRuntimeMirror:
         workspace_id: str,
         task_id: str,
         model_ids: tuple[str, ...] | None = None,
+        document_ids: set[str] | None = None,
     ) -> dict:
         runtime = self.runtime_for_workspace(db, workspace_id, model_ids=model_ids)
         user_id = runtime["user_id"]
@@ -33,11 +34,15 @@ class OpenClawRuntimeMirror:
             shutil.rmtree(documents_root)
         documents_root.mkdir(parents=True, exist_ok=True)
 
-        documents = db.scalars(
-            select(Document)
-            .where(Document.workspace_id == workspace_id, Document.status != "deleted")
-            .order_by(Document.created_at.asc())
-        ).all()
+        document_query = select(Document).where(
+            Document.workspace_id == workspace_id,
+            Document.status != "deleted",
+        )
+        if document_ids is not None:
+            document_query = document_query.where(Document.id.in_(sorted(document_ids)))
+        else:
+            document_query = document_query.where(Document.retention_scope == "workspace")
+        documents = db.scalars(document_query.order_by(Document.created_at.asc())).all()
         index_documents: list[dict] = []
         skipped_documents: list[dict] = []
         skipped_artifacts: list[dict] = []
@@ -172,7 +177,7 @@ class OpenClawRuntimeMirror:
             ),
             encoding="utf-8",
         )
-        self._ensure_runtime_permissions(user_id, roots=(self.workspace_dir(user_id),))
+        self._ensure_runtime_permissions(user_id, roots=(task_input_dir, task_output_dir))
         return {
             **runtime,
             "documents_index_path": f"{container_documents_root}/index.json",
@@ -181,6 +186,7 @@ class OpenClawRuntimeMirror:
             "host_task_output_dir": str(task_output_dir),
             "host_task_input_dir": str(task_input_dir),
             "documents_synced": len(index_documents),
+            "mirror_scope": "attachments" if document_ids is not None else "workspace",
             "mirrored_document_ids": [item["id"] for item in index_documents],
             "document_contexts": document_contexts,
             "files_synced": file_count,

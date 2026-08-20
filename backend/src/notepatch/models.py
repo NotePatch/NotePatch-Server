@@ -4,7 +4,7 @@ from notepatch.modules.ai.models.chat import ChatConversation, ChatMessage
 from notepatch.modules.admin.models.admin import AdminAuditLog, AdminOperation
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.documents.models.upload import UploadSession
-from notepatch.modules.identity.models.user import RefreshToken, User
+from notepatch.modules.identity.models.user import IdentityAuditLog, IdentityMutationKey, RefreshToken, User
 from notepatch.modules.identity.models.workspace import (
     Permission,
     Role,
@@ -51,6 +51,8 @@ __all__ = [
     "Mistake",
     "Permission",
     "Question",
+    "IdentityAuditLog",
+    "IdentityMutationKey",
     "RefreshToken",
     "Role",
     "RolePermission",

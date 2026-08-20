@@ -72,6 +72,7 @@ def create_upload_session(
         mime_type=payload.mime_type,
         file_size=payload.file_size,
         document_kind=payload.document_kind,
+        save_to_documents=payload.save_to_documents,
         title=payload.title,
         metadata=payload.metadata,
     )
@@ -125,7 +126,11 @@ def list_documents(
     _member: WorkspaceMember = Depends(get_workspace_member),
     db: Session = Depends(get_db),
 ) -> list[Document]:
-    query = select(Document).where(Document.workspace_id == workspace_id, Document.status != "deleted")
+    query = select(Document).where(
+        Document.workspace_id == workspace_id,
+        Document.status != "deleted",
+        Document.retention_scope == "workspace",
+    )
     if status_filter:
         query = query.where(Document.status == status_filter)
     if document_kind:

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from mimetypes import guess_type
 from pathlib import Path
+import time
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.chat import ChatService
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunner
+from notepatch.modules.ai.services.model_catalog import normalize_ai_model_id
 from notepatch.modules.ai.services.model_selection import AiModelSelectionService
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.documents.services.task_support import _progress
@@ -16,9 +19,91 @@ from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.modules.learning.services.knowledge import KnowledgeService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.tasks.services.cancellation import is_task_cancellation_signalled
 from notepatch.platform.config import get_settings
 from notepatch.platform.errors import PermanentTaskError
+from notepatch.platform.errors import TaskCancelledError
 from notepatch.platform.storage import StorageService
+
+
+@dataclass
+class ChatStreamEventWriter:
+    """Batch gateway deltas into durable task events and an assistant draft."""
+
+    db: Session
+    tasks: TaskService
+    task: Task
+    chat_service: ChatService
+    buffers: dict[str, str] = field(default_factory=lambda: {"answer": "", "reasoning": ""})
+    persisted_characters: dict[str, int] = field(default_factory=lambda: {"answer": 0, "reasoning": 0})
+    chunk_indexes: dict[str, int] = field(default_factory=lambda: {"answer": 0, "reasoning": 0})
+    truncated: set[str] = field(default_factory=set)
+    last_flush_at: float = field(default_factory=time.monotonic)
+
+    def write(self, stream: str, delta: str) -> None:
+        if stream not in self.buffers or not delta:
+            return
+        self.tasks.ensure_active(self.task)
+        limit = (
+            get_settings().ai_chat_stream_max_answer_chars
+            if stream == "answer"
+            else get_settings().ai_chat_stream_max_reasoning_chars
+        )
+        remaining = max(0, limit - self.persisted_characters[stream] - len(self.buffers[stream]))
+        accepted = delta[:remaining]
+        if accepted:
+            self.buffers[stream] += accepted
+        if len(accepted) < len(delta) and stream not in self.truncated:
+            self.truncated.add(stream)
+            self.tasks.add_event(
+                self.task,
+                "chat_stream_truncated",
+                "Chat stream exceeded its persisted event limit",
+                level="warning",
+                data={"stream": stream, "limit": limit},
+            )
+        if (
+            len(self.buffers[stream]) >= get_settings().ai_chat_stream_chunk_max_chars
+            or (time.monotonic() - self.last_flush_at) * 1000 >= get_settings().ai_chat_stream_flush_milliseconds
+        ):
+            self.flush()
+
+    def flush(self) -> None:
+        self.tasks.ensure_active(self.task)
+        wrote = False
+        for stream, buffered in tuple(self.buffers.items()):
+            if not buffered:
+                continue
+            self.chunk_indexes[stream] += 1
+            self.persisted_characters[stream] += len(buffered)
+            self.tasks.add_event(
+                self.task,
+                "chat_answer_delta" if stream == "answer" else "chat_reasoning_delta",
+                "Chat answer delta received" if stream == "answer" else "Chat reasoning summary delta received",
+                progress=75,
+                data={
+                    "stream": stream,
+                    "delta": buffered,
+                    "chunk_index": self.chunk_indexes[stream],
+                    "attempt": self.task.attempt,
+                    "characters": self.persisted_characters[stream],
+                },
+            )
+            if stream == "answer":
+                self.chat_service.append_assistant_stream_delta(self.task, buffered)
+            self.buffers[stream] = ""
+            wrote = True
+        if wrote:
+            self.db.commit()
+            self.last_flush_at = time.monotonic()
+
+    def summary(self) -> dict[str, int | bool]:
+        return {
+            "answer_characters": self.persisted_characters["answer"],
+            "reasoning_characters": self.persisted_characters["reasoning"],
+            "answer_truncated": "answer" in self.truncated,
+            "reasoning_truncated": "reasoning" in self.truncated,
+        }
 
 
 def process_openclaw_chat(
@@ -45,12 +130,24 @@ def process_openclaw_chat(
     db.commit()
     if isinstance(runner, OpenClawGatewayRunner):
         model_selection.ensure_credentials(provider_model)
+    settings = get_settings()
+    try:
+        title_model = normalize_ai_model_id(settings.ai_chat_title_model)
+    except ValueError:
+        title_model = None
+    chat_service = ChatService(db)
+    attachment_document_ids = chat_service.attachment_document_ids_for_task(task)
+    # An empty attachment set means an ordinary workspace chat, not an
+    # instruction to query `id IN ()`. Keep explicit attachments narrowly
+    # scoped, while allowing ordinary chat to see the user's ready documents.
+    mirror_document_ids = attachment_document_ids or None
     runtime = OpenClawUserRuntimeService().sync_workspace_documents(
         db=db,
         storage=storage,
         workspace_id=task.workspace_id,
         task_id=task.id,
-        model_ids=(provider_model,),
+        model_ids=tuple(dict.fromkeys(filter(None, (provider_model, title_model)))),
+        document_ids=mirror_document_ids,
     )
     task.payload = {
         **(task.payload or {}),
@@ -74,6 +171,7 @@ def process_openclaw_chat(
             "artifacts_skipped": runtime["artifacts_skipped"],
             "skipped_documents": runtime["skipped_documents"],
             "skipped_artifacts": runtime["skipped_artifacts"],
+            "mirror_scope": "attachments" if mirror_document_ids is not None else "workspace",
         },
     )
     db.commit()
@@ -116,7 +214,6 @@ def process_openclaw_chat(
             data={"reason": "attachment_focused_query"},
         )
         db.commit()
-    chat_service = ChatService(db)
     document_contexts = runtime.get("document_contexts") or {}
     if "attachments" in input_payload:
         input_payload["attachments"] = chat_service.resolve_attachments(
@@ -153,11 +250,47 @@ def process_openclaw_chat(
     }
     tasks.ensure_active(task)
     _progress(db, tasks, task, "openclaw_run", "OpenClaw chat started", 70)
-    result = runner.run_task(task.workspace_id, task.id, payload)
+    chat_stream = ChatStreamEventWriter(db=db, tasks=tasks, task=task, chat_service=chat_service)
+    tasks.add_event(
+        task,
+        "chat_stream_started",
+        "Chat response stream started",
+        progress=70,
+        data={"attempt": task.attempt, "thinking_enabled": _thinking_enabled(payload)},
+    )
+    db.commit()
+    result = runner.run_chat_task(
+        task.workspace_id,
+        task.id,
+        payload,
+        on_stream_event=chat_stream.write,
+        is_cancel_requested=lambda: _is_chat_cancelled(tasks, task),
+    )
+    chat_stream.flush()
     tasks.ensure_active(task)
     answer = result.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         raise PermanentTaskError("OpenClaw gateway returned no answer")
+    if not chat_stream.persisted_characters["answer"]:
+        chat_stream.write("answer", answer)
+        chat_stream.flush()
+    stream_summary = chat_stream.summary()
+    if _thinking_enabled(payload) and not stream_summary["reasoning_characters"]:
+        tasks.add_event(
+            task,
+            "chat_reasoning_unavailable",
+            "The selected model did not provide a reasoning summary",
+            level="warning",
+            data={"attempt": task.attempt},
+        )
+    tasks.add_event(
+        task,
+        "chat_stream_completed",
+        "Chat response stream completed",
+        progress=90,
+        data={"attempt": task.attempt, **stream_summary},
+    )
+    db.commit()
     output_keys = _upload_openclaw_outputs(
         task,
         storage,
@@ -184,6 +317,17 @@ def process_openclaw_chat(
         citations=result_citations,
         model_id=provider_model,
     )
+    # Make the answer visible while the non-critical title request runs, but keep
+    # the task active so clients receive a stable title before the terminal event.
+    db.commit()
+    _generate_conversation_title(
+        db=db,
+        tasks=tasks,
+        task=task,
+        runner=runner,
+        runtime=payload["_openclaw"],
+    )
+    tasks.ensure_active(task)
     tasks.mark_succeeded(
         task,
         {
@@ -195,11 +339,115 @@ def process_openclaw_chat(
             "output_key": output_key,
             "output_keys": output_keys,
             "citations": result_citations,
+            "stream": stream_summary,
         },
     )
 
 
+def _thinking_enabled(payload: dict) -> bool:
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    thinking = options.get("thinking") if isinstance(options.get("thinking"), dict) else {}
+    return thinking.get("enabled") is True
+
+
+def _is_chat_cancelled(tasks: TaskService, task: Task) -> bool:
+    if is_task_cancellation_signalled(task.id):
+        return True
+    try:
+        tasks.ensure_active(task)
+    except TaskCancelledError:
+        return True
+    return False
+
+
+def _generate_conversation_title(
+    *,
+    db: Session,
+    tasks: TaskService,
+    task: Task,
+    runner: OpenClawRunner,
+    runtime: dict,
+) -> None:
+    settings = get_settings()
+    if not settings.ai_chat_auto_title_enabled:
+        return
+    chat_service = ChatService(db)
+    title_context = chat_service.title_context_for_task(
+        task,
+        limit=settings.ai_chat_title_message_limit,
+    )
+    if title_context is None:
+        return
+    conversation, messages = title_context
+    client_locale = task.payload.get("client_locale")
+    if not isinstance(client_locale, str) or not client_locale.strip():
+        client_locale = settings.ai_chat_title_fallback_locale
+    try:
+        tasks.ensure_active(task)
+        title_model = normalize_ai_model_id(settings.ai_chat_title_model)
+        if isinstance(runner, OpenClawGatewayRunner):
+            AiModelSelectionService(db).ensure_credentials(title_model)
+        generated_title = runner.generate_conversation_title(
+            task.workspace_id,
+            conversation.id,
+            messages,
+            runtime=runtime,
+            provider_model=title_model,
+            client_locale=client_locale,
+            max_length=settings.ai_chat_title_max_length,
+            timeout_seconds=settings.ai_chat_title_timeout_seconds,
+        )
+        # A user may have stopped the chat while the inexpensive title request
+        # was in flight. Discard that result instead of mutating the deleted/
+        # cancelled turn's conversation.
+        tasks.ensure_active(task)
+        if not generated_title:
+            return
+        updated = chat_service.apply_generated_title(
+            conversation_id=conversation.id,
+            generated_title=generated_title,
+            max_length=settings.ai_chat_title_max_length,
+        )
+        if updated is None:
+            db.rollback()
+            return
+        tasks.add_event(
+            task,
+            "chat_title_generated",
+            "Conversation title generated",
+            data={
+                "conversation_id": updated.id,
+                "title_source": updated.title_source,
+                "title_model": title_model,
+                "client_locale": client_locale,
+            },
+        )
+        db.commit()
+    except TaskCancelledError:
+        db.rollback()
+        return
+    except Exception as exc:
+        db.rollback()
+        persisted_task = db.get(Task, task.id)
+        if persisted_task is None:
+            return
+        tasks.add_event(
+            persisted_task,
+            "chat_title_generation_failed",
+            "Conversation title generation failed; the prompt title was retained",
+            level="warning",
+            data={
+                "error": str(exc)[:500],
+                "title_model": settings.ai_chat_title_model,
+                "client_locale": client_locale,
+            },
+        )
+        db.commit()
+
+
 def _should_retrieve_knowledge(input_payload: dict) -> bool:
+    if input_payload.get("use_knowledge_base") is False:
+        return False
     attachments = input_payload.get("attachments")
     has_attachments = isinstance(attachments, list) and bool(attachments)
     if not has_attachments:

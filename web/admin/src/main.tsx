@@ -18,6 +18,8 @@ import { OperationsPage } from "./pages/Operations";
 import { KnowledgePage } from "./pages/Knowledge";
 import "./styles.css";
 
+const ROUTER_BASE = window.location.pathname.match(/^\/np-[0-9a-f]{32}(?=\/|$)/i)?.[0] ?? "/";
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -45,7 +47,7 @@ function RequireAdmin() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename={ROUTER_BASE}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<RequireAdmin />}>

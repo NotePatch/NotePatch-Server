@@ -24,17 +24,30 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _create_token(subject: str, token_type: str, expires_delta: timedelta) -> tuple[str, datetime]:
+def _create_token(
+    subject: str,
+    token_type: str,
+    expires_delta: timedelta,
+    *,
+    extra_claims: dict[str, Any] | None = None,
+) -> tuple[str, datetime]:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     expires_at = now + expires_delta
     payload = {"sub": subject, "type": token_type, "iat": now, "exp": expires_at, "jti": str(uuid.uuid4())}
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, settings.effective_secret_key, algorithm=settings.jwt_algorithm), expires_at
 
 
-def create_access_token(user_id: str) -> tuple[str, datetime]:
+def create_access_token(user_id: str, auth_version: int = 1) -> tuple[str, datetime]:
     settings = get_settings()
-    return _create_token(user_id, "access", timedelta(minutes=settings.access_token_expire_minutes))
+    return _create_token(
+        user_id,
+        "access",
+        timedelta(minutes=settings.access_token_expire_minutes),
+        extra_claims={"auth_version": auth_version},
+    )
 
 
 def create_refresh_token(user_id: str) -> tuple[str, datetime]:

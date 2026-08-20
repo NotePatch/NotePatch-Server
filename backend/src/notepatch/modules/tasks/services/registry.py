@@ -19,9 +19,10 @@ from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.modules.learning.services.task_handlers import run_learning_task
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
 from notepatch.modules.learning.services.merge import LearningUnitMergeService
+from notepatch.modules.identity.services.profile import AvatarService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
-from notepatch.platform.errors import PermanentTaskError
+from notepatch.platform.errors import PermanentTaskError, RetryableTaskError
 from notepatch.platform.gpu_lease import GpuLeaseService
 from notepatch.platform.storage import StorageService
 
@@ -42,6 +43,7 @@ REGISTERED_TASK_TYPES = {
     *LEARNING_TASK_TYPES,
     "merge_learning_units",
     "purge_document",
+    "purge_avatar_object",
     "purge_user",
     "openclaw_agent_run",
 }
@@ -98,6 +100,20 @@ def execute_registered_task(context: TaskExecutionContext) -> None:
         context.db.commit()
         result = DocumentPurgeService(context.db, context.storage).purge(task)
         context.tasks.mark_succeeded(task, result)
+    elif task.task_type == "purge_avatar_object":
+        context.tasks.add_event(task, "avatar_cleanup_started", "Obsolete avatar cleanup started", progress=10)
+        context.db.commit()
+        try:
+            AvatarService(context.db, context.storage).cleanup_object(
+                user_id=str(task.payload.get("user_id") or ""),
+                backend=str(task.payload.get("storage_backend") or ""),
+                object_key=str(task.payload.get("object_key") or ""),
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise RetryableTaskError("Avatar cleanup storage is unavailable") from exc
+        context.tasks.mark_succeeded(task, {"object_deleted": True})
     elif task.task_type == "purge_user":
         context.tasks.add_event(task, "user_purge_started", "User purge started", progress=10)
         context.db.commit()

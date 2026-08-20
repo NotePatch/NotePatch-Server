@@ -1,0 +1,14 @@
+[Unit]
+Description=Force NotePatch FRP server traffic onto the main routing table
+After=network-online.target
+Wants=network-online.target
+Before=frpc.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/notepatch-frp-direct-route add
+ExecStop=/usr/local/sbin/notepatch-frp-direct-route delete
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

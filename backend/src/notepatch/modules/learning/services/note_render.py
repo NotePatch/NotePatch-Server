@@ -36,8 +36,7 @@ class NoteRenderService:
             algorithm=self.settings.jwt_algorithm,
         )
         path = f"/api/v1/assets/study-notes/render?token={quote(token)}"
-        base = self.settings.public_api_base_url.rstrip("/")
-        return f"{base}{path}" if base else path
+        return self.settings.public_route_url(path)
 
     def decode(self, token: str) -> dict:
         try:
@@ -53,7 +52,7 @@ class NoteRenderService:
         return payload
 
     def wrap_html(self, note: StudyNoteVersion, fragment: str) -> str:
-        css_url = THEME_CSS_PATH
+        css_url = self.settings.public_route_url(THEME_CSS_PATH)
         title = escape(note.title)
         return (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"

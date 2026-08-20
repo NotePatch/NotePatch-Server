@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from notepatch.platform.config import get_settings
 from notepatch.shared.schemas import ORMModel, metadata_field
 
 
@@ -51,7 +52,11 @@ class KnowledgeChunkRead(ORMModel):
 
 class StudyNoteRendering(BaseModel):
     theme_id: str = "notepatch-paper-v1"
-    css_url: str = "/api/v1/assets/note-themes/notepatch-paper-v1.css"
+    css_url: str = Field(
+        default_factory=lambda: get_settings().public_route_url(
+            "/api/v1/assets/note-themes/notepatch-paper-v1.css"
+        )
+    )
     wrapper_class: str = "np-note-theme"
 
 

@@ -38,6 +38,7 @@ class UploadService:
         file_size: int | None,
         document_kind: str,
         title: str | None,
+        save_to_documents: bool = True,
         metadata: dict | None = None,
     ) -> tuple[Document, UploadSession, dict[str, str], str]:
         if file_size is not None and file_size > self.settings.upload_max_file_size_mb * 1024 * 1024:
@@ -59,6 +60,7 @@ class UploadService:
             file_size=file_size,
             file_type=infer_file_type(safe_filename, mime_type),
             document_kind=document_kind,
+            retention_scope="workspace" if save_to_documents else "conversation",
             storage_backend="seaweedfs",
             bucket=bucket,
             object_key=object_key,

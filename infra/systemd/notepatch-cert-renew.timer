@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew the NotePatch IP certificate every eight hours
+
+[Timer]
+OnCalendar=*-*-* 00,08,16:15:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=notepatch-cert-renew.service
+
+[Install]
+WantedBy=timers.target

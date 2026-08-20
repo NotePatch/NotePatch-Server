@@ -2,21 +2,25 @@ import time
 from contextlib import asynccontextmanager
 
 import redis
-from fastapi import APIRouter, FastAPI, Header, HTTPException, status
-from fastapi.responses import Response
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, status
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
 from notepatch.modules.admin.api import admin, management
 from notepatch.modules.ai.api import ai
 from notepatch.modules.documents.api import artifacts, documents, webhooks
-from notepatch.modules.identity.api import auth, presence, workspaces
+from notepatch.modules.identity.api import auth, presence, profile, workspaces
 from notepatch.modules.learning.api import assets, homeworks, knowledge, learning, mistakes
 from notepatch.modules.tasks.api import tasks
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import SessionLocal
 from notepatch.platform.metrics import HTTP_LATENCY, HTTP_REQUESTS, render_metrics
 from notepatch.platform.storage import StorageService
+from notepatch.shared.api import ApiError
 from notepatch.platform.startup import validate_production_settings
 
 settings = get_settings()
@@ -30,6 +34,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
+    root_path=settings.public_path_prefix,
     docs_url="/api/v1/docs",
     openapi_url="/api/v1/openapi.json",
     redoc_url=None,
@@ -47,6 +52,7 @@ app.add_middleware(
 api_v1 = APIRouter(prefix="/api/v1")
 for router in (
     auth.router,
+    profile.router,
     workspaces.router,
     admin.router,
     management.router,
@@ -64,6 +70,45 @@ for router in (
 ):
     api_v1.include_router(router)
 app.include_router(api_v1)
+
+
+def _uses_api_envelope(path: str) -> bool:
+    return path.startswith("/api/v1/user/") or ("/ai/conversations/" in path and path.endswith("/revisions"))
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message, "data": exc.data},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    if not _uses_api_envelope(request.url.path):
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "validation_error",
+            "message": "Request validation failed",
+            "data": {"errors": jsonable_encoder(exc.errors())},
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def envelope_http_error_handler(request: Request, exc: HTTPException):
+    if not _uses_api_envelope(request.url.path):
+        return await http_exception_handler(request, exc)
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": f"http_{exc.status_code}", "message": message, "data": None},
+        headers=exc.headers,
+    )
 
 
 @app.middleware("http")

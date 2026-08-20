@@ -127,6 +127,8 @@ class DocumentPurgeService:
         document.file_size = None
         document.file_type = "other"
         document.document_kind = "other"
+        document.retention_scope = "workspace"
+        document.chat_conversation_id = None
         document.object_key = ""
         document.upload_id = None
         document.tus_upload_url = None

@@ -188,6 +188,10 @@ class StorageService:
         return str(PurePosixPath("workspaces", workspace_id, "sandbox", "tasks", task_id, "output", filename))
 
     @staticmethod
+    def user_avatar_key(user_id: str, version: str, ext: str) -> str:
+        return str(PurePosixPath("users", user_id, "profile", "avatar", f"{version}.{ext}"))
+
+    @staticmethod
     def learning_unit_note_key(
         workspace_id: str,
         learning_unit_id: str,

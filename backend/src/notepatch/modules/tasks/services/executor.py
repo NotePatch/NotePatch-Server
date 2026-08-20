@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.chat import ChatService
 from notepatch.modules.admin.models.admin import AdminOperation
 from notepatch.modules.ai.services.gateway import OpenClawRunner, get_openclaw_runner
+from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.ai.services.skill_runner import OpenClawSkillRunner
 from notepatch.modules.documents.models.document import Document
 from notepatch.modules.documents.ocr import OcrPipeline
@@ -21,6 +24,9 @@ from notepatch.platform.database import utcnow
 from notepatch.platform.errors import RetryableTaskError, TaskCancelledError
 from notepatch.platform.gpu_lease import GpuLeaseService
 from notepatch.platform.storage import StorageService
+
+
+logger = logging.getLogger(__name__)
 
 
 def process_task(
@@ -77,12 +83,27 @@ def process_task(
         if task is not None:
             if task.task_type == "grade_homework":
                 learning.cleanup_cancelled_grading(task, storage)
+            if task.task_type == "openclaw_agent_run":
+                ChatService(db).mark_assistant_cancelled(task, str(exc))
             TaskService(db).mark_cancelled(task, str(exc))
     except Exception as exc:
         _handle_task_failure(db, task_id, learning, storage, exc)
     completed_task = db.get(Task, task_id)
     if completed_task is not None:
         reconcile_learning_unit_merge(db, completed_task)
+        if completed_task.task_type == "openclaw_agent_run" and completed_task.status in {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }:
+            try:
+                OpenClawUserRuntimeService().cleanup_task_context(
+                    db,
+                    completed_task.workspace_id,
+                    completed_task.id,
+                )
+            except Exception as exc:
+                logger.warning("Could not clean OpenClaw task context %s: %s", completed_task.id, exc)
     return completed_task
 
 

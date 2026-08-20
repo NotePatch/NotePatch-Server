@@ -20,6 +20,7 @@ AUTO_LEARNING_DOCUMENT_KINDS = {
     "rubric",
 }
 DOCUMENT_KINDS = AUTO_LEARNING_DOCUMENT_KINDS | {CHAT_ATTACHMENT_KIND, "other"}
+DOCUMENT_RETENTION_SCOPES = {"workspace", "conversation"}
 ARTIFACT_TYPES = {
     "original",
     "converted_pdf",
@@ -45,6 +46,8 @@ class Document(Base):
         Index("ix_documents_workspace_id", "workspace_id"),
         Index("ix_documents_workspace_id_id", "workspace_id", "id"),
         Index("ix_documents_purge_status", "purge_status"),
+        Index("ix_documents_workspace_retention", "workspace_id", "retention_scope", "status"),
+        Index("ix_documents_chat_conversation_id", "chat_conversation_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -58,6 +61,10 @@ class Document(Base):
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     file_type: Mapped[str] = mapped_column(String(32), default="other", nullable=False)
     document_kind: Mapped[str] = mapped_column(String(64), default="other", nullable=False)
+    retention_scope: Mapped[str] = mapped_column(String(32), default="workspace", nullable=False)
+    chat_conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("chat_conversations.id", ondelete="SET NULL"), nullable=True
+    )
     storage_backend: Mapped[str] = mapped_column(String(64), default="seaweedfs", nullable=False)
     bucket: Mapped[str] = mapped_column(String(255), nullable=False)
     object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -81,6 +88,10 @@ class Document(Base):
     artifacts: Mapped[list["DocumentArtifact"]] = relationship(
         back_populates="document", cascade="all, delete-orphan", lazy="selectin"
     )
+
+    @property
+    def save_to_documents(self) -> bool:
+        return self.retention_scope == "workspace"
 
 
 class DocumentArtifact(Base):

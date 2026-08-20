@@ -15,6 +15,8 @@ class UserRead(ORMModel):
     must_change_password: bool
     ai_history_enabled: bool
     preferred_ai_model: str | None = None
+    avatar_url: str | None = None
+    profile_version: int = 1
     created_at: datetime
 
 

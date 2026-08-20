@@ -55,7 +55,7 @@ def test_ocr_document_task_routes_to_ocr_queue(client, db_sessionmaker, monkeypa
     assert event.data["redis_key"] == "notepatch:tasks:ocr"
 
 
-def test_openclaw_backed_learning_tasks_route_to_chat_queue(client, db_sessionmaker, monkeypatch):
+def test_openclaw_backed_learning_tasks_route_to_ai_queue(client, db_sessionmaker, monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr("notepatch.modules.tasks.services.task.redis.from_url", lambda *args, **kwargs: fake_redis)
     user = register_user(client, "queue-learning-ai-route@example.com")
@@ -77,7 +77,7 @@ def test_openclaw_backed_learning_tasks_route_to_chat_queue(client, db_sessionma
             for task_type in task_types
         ]
 
-    assert fake_redis.lists == {"notepatch:tasks:chat": task_ids}
+    assert fake_redis.lists == {"notepatch:tasks:ai": task_ids}
 
 
 def test_control_tasks_stay_on_default_queue(client, db_sessionmaker, monkeypatch):
@@ -136,6 +136,8 @@ def test_worker_queue_name_resolution_uses_configured_keys():
         assert redis_keys_for_worker_queues(["ocr"]) == ["notepatch:tasks:ocr"]
         assert queue_names_from_args("chat") == ["chat"]
         assert redis_keys_for_worker_queues(["chat"]) == ["notepatch:tasks:chat"]
+        assert queue_names_from_args("ai") == ["ai"]
+        assert redis_keys_for_worker_queues(["ai"]) == ["notepatch:tasks:ai"]
     finally:
         settings.worker_queues = old_worker_queues
 
@@ -166,6 +168,26 @@ def test_chat_worker_queue_can_pop_openclaw_task():
     assert fake_redis.brpop(redis_keys_for_worker_queues(["chat"]), timeout=0) == (
         "notepatch:tasks:chat",
         "chat-task-id",
+    )
+
+
+def test_chat_worker_does_not_pop_learning_ai_tasks():
+    settings = get_settings()
+    fake_redis = FakeRedis()
+    fake_redis.rpush(redis_key_for_queue(settings, "ai"), "learning-task-id")
+
+    assert fake_redis.brpop(redis_keys_for_worker_queues(["chat"]), timeout=0) is None
+    assert fake_redis.lists[redis_key_for_queue(settings, "ai")] == ["learning-task-id"]
+
+
+def test_ai_worker_queue_can_pop_learning_task():
+    settings = get_settings()
+    fake_redis = FakeRedis()
+    fake_redis.rpush(redis_key_for_queue(settings, "ai"), "learning-task-id")
+
+    assert fake_redis.brpop(redis_keys_for_worker_queues(["ai"]), timeout=0) == (
+        "notepatch:tasks:ai",
+        "learning-task-id",
     )
 
 
@@ -306,11 +328,11 @@ def test_orphaned_running_task_is_requeued(client, db_sessionmaker):
             task.started_at = utcnow() - timedelta(seconds=60)
             db.commit()
 
-            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 1
+            assert recover_orphaned_tasks(fake_redis, db, ["ai"]) == 1
             db.refresh(task)
             assert task.status == "queued"
             assert task.attempt == 1
-            assert fake_redis.lists["notepatch:tasks:chat"] == [task.id]
+            assert fake_redis.lists["notepatch:tasks:ai"] == [task.id]
             event = db.query(TaskEvent).filter_by(task_id=task.id, event_type="orphan_requeued").one()
             assert event.data["attempt"] == 1
     finally:
@@ -337,7 +359,7 @@ def test_running_task_with_live_lease_is_not_requeued(client, db_sessionmaker):
             db.commit()
             fake_redis.set(task_lease_key(task.id), "worker", ex=60)
 
-            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 0
+            assert recover_orphaned_tasks(fake_redis, db, ["ai"]) == 0
             db.refresh(task)
             assert task.status == "running"
     finally:
@@ -364,7 +386,7 @@ def test_orphaned_task_at_attempt_limit_fails(client, db_sessionmaker):
             task.started_at = utcnow() - timedelta(seconds=60)
             db.commit()
 
-            assert recover_orphaned_tasks(fake_redis, db, ["chat"]) == 1
+            assert recover_orphaned_tasks(fake_redis, db, ["ai"]) == 1
             db.refresh(task)
             assert task.status == "failed"
             assert "attempt limit" in task.error_message

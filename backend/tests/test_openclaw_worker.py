@@ -2,6 +2,7 @@ from pathlib import Path
 
 from notepatch.platform.config import get_settings
 from notepatch.modules.tasks.models.task import Task, TaskEvent
+from notepatch.modules.documents.models.document import Document
 from notepatch.modules.ai.services.gateway import OpenClawRunner
 from notepatch.modules.ai.services.task_handler import _should_retrieve_knowledge
 from notepatch.modules.tasks.services.executor import process_task
@@ -84,7 +85,42 @@ def test_openclaw_worker_uses_injected_gateway_runner(client, db_sessionmaker, f
         assert task.result["answer"] == "gateway ok"
         assert task.result["output_key"] in {key[1] for key in fake_storage.objects}
         events = db.query(TaskEvent).filter_by(task_id=task_id).all()
-        assert {event.event_type for event in events} >= {"openclaw_prepare", "openclaw_run", "succeeded"}
+        assert {event.event_type for event in events} >= {
+            "openclaw_prepare",
+            "openclaw_run",
+            "chat_stream_started",
+            "chat_answer_delta",
+            "chat_stream_completed",
+            "succeeded",
+        }
+
+
+def test_user_can_cancel_queued_chat_task_and_partial_message_is_cancelled(client):
+    user = register_user(client, "openclaw-cancel@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    task_id = create_openclaw_chat(client, user["access_token"], workspace_id)
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/tasks/{task_id}/cancel",
+        headers=auth_headers(user["access_token"]),
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "cancelled"
+
+    conversation_id = response.json()["payload"]["conversation_id"]
+    messages = client.get(
+        f"/api/v1/workspaces/{workspace_id}/ai/conversations/{conversation_id}/messages",
+        headers=auth_headers(user["access_token"]),
+    ).json()["items"]
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["status"] == "cancelled"
+
+    repeated = client.post(
+        f"/api/v1/workspaces/{workspace_id}/tasks/{task_id}/cancel",
+        headers=auth_headers(user["access_token"]),
+    )
+    assert repeated.status_code == 202
+    assert repeated.json()["status"] == "cancelled"
 
 
 def test_openclaw_worker_marks_task_failed_when_gateway_runner_fails(client, db_sessionmaker, fake_storage, tmp_path):
@@ -129,10 +165,19 @@ def test_openclaw_worker_fails_fast_without_openai_key(client, db_sessionmaker, 
         settings.openai_api_key = old_key
 
 
-def test_openclaw_worker_skips_unfinished_document_mirror(client, db_sessionmaker, fake_storage, tmp_path):
+def test_openclaw_worker_mirrors_ready_workspace_documents_when_chat_has_no_attachments(client, db_sessionmaker, fake_storage, tmp_path):
     user = register_user(client, "openclaw-storage-failure@example.com")
     workspace_id = first_workspace_id(client, user["access_token"])
     upload = create_upload_session(client, user["access_token"], workspace_id)
+    fake_storage.objects[(upload["bucket"], upload["object_key"])] = {
+        "file_size": 12,
+        "mime_type": "application/pdf",
+        "metadata": {},
+        "body": b"ready document",
+    }
+    with db_sessionmaker() as db:
+        db.get(Document, upload["document"]["id"]).status = "ready"
+        db.commit()
     task_id = create_openclaw_chat(client, user["access_token"], workspace_id)
 
     with db_sessionmaker() as db:
@@ -146,9 +191,11 @@ def test_openclaw_worker_skips_unfinished_document_mirror(client, db_sessionmake
         assert task.status == "succeeded"
         events = db.query(TaskEvent).filter_by(task_id=task_id, event_type="openclaw_prepare").all()
         assert events
-        assert events[0].data["documents_skipped"] == 1
-        assert events[0].data["skipped_documents"][0]["id"] == upload["document"]["id"]
-        assert events[0].data["skipped_documents"][0]["reason"] == "status_not_mirrorable"
+        # No explicit attachment means a normal workspace chat. The ready
+        # document must be available in its task-local index.
+        assert events[0].data["mirror_scope"] == "workspace"
+        assert events[0].data["documents_synced"] == 1
+        assert upload["document"]["id"] in task.payload["mirrored_document_ids"]
 
 
 def test_chat_creates_openclaw_task_and_legacy_routes_are_removed(client):
@@ -166,7 +213,10 @@ def test_chat_creates_openclaw_task_and_legacy_routes_are_removed(client):
     assert task["task_type"] == "openclaw_agent_run"
     assert task["payload"]["prompt"] == "帮我复习今天的内容"
     assert task["payload"]["input"] == {"topic": "math"}
-    assert task["payload"]["options"] == {"model": "openclaw"}
+    assert task["payload"]["options"] == {
+        "model": "openclaw",
+        "thinking": {"enabled": False, "effort": "off"},
+    }
     assert task["payload"]["conversation_id"]
     assert task["payload"]["user_message_id"]
     assert task["payload"]["assistant_message_id"]
@@ -190,6 +240,7 @@ def test_attachment_focused_chat_skips_knowledge_retrieval_by_default():
     attachment = {"document_id": "doc-1", "file_type": "image"}
 
     assert _should_retrieve_knowledge({}) is True
+    assert _should_retrieve_knowledge({"use_knowledge_base": False}) is False
     assert _should_retrieve_knowledge({"attachments": [attachment]}) is False
     assert (
         _should_retrieve_knowledge(

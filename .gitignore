@@ -15,3 +15,6 @@ web/admin/dist/
 services/doctr/vendor/DocTr/model_pretrained/
 *.egg-info/
 *.db
+
+.public-gateway.env
+.frp-client-token

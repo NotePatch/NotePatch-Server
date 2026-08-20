@@ -27,7 +27,12 @@ def observe_task(task, terminal_status: str) -> None:
 def refresh_queue_metrics() -> None:
     settings = get_settings()
     client = redis.from_url(settings.redis_url, socket_connect_timeout=1, socket_timeout=1)
-    for queue in {settings.default_queue_name, settings.ocr_queue_name, settings.chat_queue_name}:
+    for queue in {
+        settings.default_queue_name,
+        settings.ocr_queue_name,
+        settings.chat_queue_name,
+        settings.ai_queue_name,
+    }:
         key = settings.redis_task_queue if queue == settings.default_queue_name else f"{settings.redis_task_queue}:{queue}"
         QUEUE_LENGTH.labels(queue).set(client.llen(key))
 

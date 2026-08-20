@@ -187,8 +187,10 @@ def test_openclaw_runtime_writes_openai_base_url_from_env(client):
         config = json.loads(OpenClawUserRuntimeService().openclaw_json_path(user_id).read_text(encoding="utf-8"))
         assert config["models"]["providers"]["openai"]["baseUrl"] == "https://proxy.example.com/v1"
         model_id = settings.openclaw_agent_model.removeprefix("openai/")
+        title_model_id = settings.ai_chat_title_model.removeprefix("openai/")
         assert config["models"]["providers"]["openai"]["models"] == [
-            {"id": model_id, "name": model_id, "input": ["text", "image"]}
+            {"id": model_id, "name": model_id, "input": ["text", "image"]},
+            {"id": title_model_id, "name": title_model_id, "input": ["text", "image"]},
         ]
         assert "OPENAI_API_KEY" not in json.dumps(config)
     finally:
@@ -330,6 +332,43 @@ def test_openclaw_document_sync_is_limited_to_current_user_workspace(
     assert second_context["documents_index_path"] != context["documents_index_path"]
     assert index_path.exists()
     assert (Path(second_context["host_task_input_dir"]) / "documents" / "index.json").exists()
+
+
+def test_openclaw_document_sync_can_limit_snapshot_to_selected_documents(
+    client, db_sessionmaker, fake_storage
+):
+    user = register_user(client, "openclaw-filtered-sync@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    first = _create_upload_session(client, user["access_token"], workspace_id, "first.pdf")
+    second = _create_upload_session(client, user["access_token"], workspace_id, "second.pdf")
+    for upload in (first, second):
+        fake_storage.objects[(upload["bucket"], upload["object_key"])] = {
+            "file_size": 10,
+            "mime_type": "application/pdf",
+            "metadata": {},
+            "body": b"document",
+        }
+
+    with db_sessionmaker() as db:
+        db.get(Document, first["document"]["id"]).status = "uploaded"
+        db.get(Document, second["document"]["id"]).status = "uploaded"
+        db.commit()
+        context = OpenClawUserRuntimeService().sync_workspace_documents(
+            db=db,
+            storage=fake_storage,
+            workspace_id=workspace_id,
+            task_id="task-filtered-sync",
+            document_ids={second["document"]["id"]},
+        )
+
+    index = json.loads(
+        (Path(context["host_task_input_dir"]) / "documents" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["id"] for item in index["documents"]] == [second["document"]["id"]]
+    assert context["documents_synced"] == 1
+    assert context["files_synced"] == 1
 
 
 def test_openclaw_document_sync_skips_created_and_bad_object_keys(client, db_sessionmaker, fake_storage):

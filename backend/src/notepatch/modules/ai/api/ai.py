@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -6,6 +6,7 @@ from notepatch.entrypoints.deps import (
     get_ai_model_catalog_service,
     get_current_user,
     get_task_service,
+    get_storage_service,
     get_workspace_member,
 )
 from notepatch.platform.database import get_db
@@ -25,11 +26,13 @@ from notepatch.modules.ai.schemas.ai import (
     ChatConversationUpdate,
     ChatMessagePage,
     ChatMessageRead,
+    ChatMessageRevisionRequest,
     ChatRequest,
     GenerateFlashcardsRequest,
 )
 from notepatch.modules.tasks.schemas.task import TaskRead
 from notepatch.modules.ai.services.chat import ChatConversationNotFoundError, ChatService
+from notepatch.modules.ai.services.locale import resolve_client_locale
 from notepatch.modules.ai.services.model_catalog import (
     AiModelCatalogService,
     AiModelCatalogUnavailableError,
@@ -39,6 +42,8 @@ from notepatch.modules.ai.services.model_selection import AiModelSelectionServic
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.config import get_settings
 from notepatch.platform.rate_limit import RateLimiter
+from notepatch.platform.storage import StorageService
+from notepatch.shared.api import ApiEnvelope, ApiError
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/ai", tags=["ai"])
 
@@ -92,6 +97,7 @@ def select_ai_model(
 def chat(
     workspace_id: str,
     payload: ChatRequest,
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
     member: WorkspaceMember = Depends(get_workspace_member),
     current_user: User = Depends(get_current_user),
     task_service: TaskService = Depends(get_task_service),
@@ -106,6 +112,11 @@ def chat(
             input_payload=payload.input,
             options=payload.options,
             conversation_id=payload.conversation_id,
+            client_locale=resolve_client_locale(
+                payload.client_locale,
+                accept_language,
+                get_settings().ai_chat_title_fallback_locale,
+            ),
             task_service=task_service,
         )
     except ChatConversationNotFoundError as exc:
@@ -154,6 +165,7 @@ def list_messages(
     conversation_id: str,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=100),
+    include_superseded: bool = Query(default=False),
     _member: WorkspaceMember = Depends(get_workspace_member),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -172,8 +184,47 @@ def list_messages(
         user_id=current_user.id,
         page=page,
         page_size=page_size,
+        include_superseded=include_superseded,
     )
     return ChatMessagePage(items=items, page=page, page_size=page_size, total=total)
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/revisions",
+    response_model=ApiEnvelope[TaskRead],
+    status_code=status.HTTP_201_CREATED,
+)
+def revise_chat_message(
+    workspace_id: str,
+    conversation_id: str,
+    message_id: str,
+    payload: ChatMessageRevisionRequest,
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    task_service: TaskService = Depends(get_task_service),
+) -> ApiEnvelope[TaskRead]:
+    require_member_permission(task_service.db, member, "ai.run")
+    RateLimiter().check("ai", current_user.id, get_settings().ai_rate_limit_per_minute)
+    try:
+        task = ChatService(task_service.db).revise_message(
+            workspace_id=workspace_id,
+            user=current_user,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            prompt=payload.prompt,
+            input_payload=payload.input,
+            options=payload.options,
+            client_locale=resolve_client_locale(
+                payload.client_locale,
+                accept_language,
+                get_settings().ai_chat_title_fallback_locale,
+            ),
+            task_service=task_service,
+        )
+    except ChatConversationNotFoundError as exc:
+        raise ApiError(404, "chat_message_not_found", "Chat message not found") from exc
+    return ApiEnvelope(code="ok", message="Chat message revised", data=task)
 
 
 @router.patch("/conversations/{conversation_id}", response_model=ChatConversationRead)
@@ -204,6 +255,7 @@ def delete_conversation(
     _member: WorkspaceMember = Depends(get_workspace_member),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    storage: StorageService = Depends(get_storage_service),
 ) -> None:
     service = ChatService(db)
     try:
@@ -214,7 +266,7 @@ def delete_conversation(
         )
     except ChatConversationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found") from exc
-    service.delete_conversation(conversation)
+    service.delete_conversation(conversation, storage=storage)
 
 
 @router.post("/generate-flashcards", response_model=TaskRead, status_code=status.HTTP_201_CREATED)

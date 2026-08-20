@@ -447,6 +447,56 @@ def process_scan_document(
     if document.scan_status == "clean" and document.sha256 and document.detected_mime_type:
         tasks.mark_succeeded(task, {"document_id": document.id, "reused": True})
         return
+    settings = get_settings()
+    if not settings.clamav_enabled:
+        if document.scan_status in {"infected", "failed"} or document.status == "failed":
+            tasks.mark_failed(
+                task,
+                document.scan_message or "Document security validation previously failed",
+            )
+            return
+        previous_status = document.status
+        document.scan_status = "skipped"
+        document.scan_message = None
+        document.scanned_at = None
+        if document.status == "scanning":
+            document.status = "uploaded"
+        artifact = db.scalar(
+            select(DocumentArtifact).where(
+                DocumentArtifact.workspace_id == task.workspace_id,
+                DocumentArtifact.document_id == document.id,
+                DocumentArtifact.artifact_type == "original",
+            )
+        )
+        if artifact is not None:
+            artifact.metadata_ = {
+                **(artifact.metadata_ or {}),
+                "scan_status": "skipped",
+                "scanner": "disabled",
+            }
+        tasks.add_event(
+            task,
+            "scan_skipped",
+            "Document security scan is disabled",
+            progress=90,
+            data={"scan_status": "skipped", "previous_status": previous_status},
+        )
+        db.commit()
+        downstream = None
+        if document.status == "uploaded" and settings.auto_learning_pipeline:
+            downstream = LearningWorkflowService(db, storage).schedule_after_upload(document)
+            if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
+                document.status = "ready"
+                db.commit()
+        tasks.mark_succeeded(
+            task,
+            {
+                "document_id": document.id,
+                "scan_status": "skipped",
+                "downstream_task_id": downstream.id if downstream else None,
+            },
+        )
+        return
     tasks.add_event(task, "scan_started", "Document security scan started", progress=10)
     db.commit()
     with tempfile.TemporaryDirectory(prefix=f"notepatch-scan-{task.id}-") as tmpdir:
@@ -506,7 +556,7 @@ def process_scan_document(
             **(artifact.metadata_ or {}),
             "sha256": result.sha256,
             "scan_status": "clean",
-            "scanner": "clamav" if get_settings().clamav_enabled else "disabled",
+            "scanner": "clamav",
         }
     tasks.add_event(
         task,

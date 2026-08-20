@@ -408,6 +408,7 @@ def test_chat_attachments_and_other_uploads_skip_automatic_learning(
         ]
 
         assert {upload["document"]["status"] for upload in uploads} == {"ready"}
+        assert {upload["document"]["scan_status"] for upload in uploads} == {"skipped"}
         document_ids = {upload["document"]["id"] for upload in uploads}
         with db_sessionmaker() as db:
             assert db.scalar(

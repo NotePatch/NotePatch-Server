@@ -13,6 +13,8 @@ OPENCLAW_BACKED_TASK_TYPES = {
     "highlight_study_notes",
 }
 
+OPENCLAW_LEARNING_TASK_TYPES = OPENCLAW_BACKED_TASK_TYPES - {"openclaw_agent_run"}
+
 
 def parse_queue_names(value: str | None, *, default: str) -> list[str]:
     names: list[str] = []
@@ -26,8 +28,10 @@ def parse_queue_names(value: str | None, *, default: str) -> list[str]:
 def queue_name_for_task_type(settings: Settings, task_type: str) -> str:
     if task_type in {"ocr_document", "document_processing_pipeline"}:
         return settings.ocr_queue_name
-    if task_type in OPENCLAW_BACKED_TASK_TYPES:
+    if task_type == "openclaw_agent_run":
         return settings.chat_queue_name
+    if task_type in OPENCLAW_LEARNING_TASK_TYPES:
+        return settings.ai_queue_name
     return settings.default_queue_name
 
 

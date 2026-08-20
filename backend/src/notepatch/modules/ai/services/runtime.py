@@ -46,8 +46,9 @@ class OpenClawUserRuntimeService(
         self, user: User, workspace: Workspace, *, model_ids: tuple[str, ...] | None = None
     ) -> dict:
         user_root = self.user_root(user.id)
+        existing_runtime = user_root.exists()
         shutil.rmtree(self.documents_root(user.id), ignore_errors=True)
-        for path in (
+        runtime_directories = (
             self.home_dir(user.id) / ".openclaw",
             self.auth_profiles_path(user.id).parent,
             self.skills_dir(user.id),
@@ -55,7 +56,8 @@ class OpenClawUserRuntimeService(
             self.notepatch_root(user.id) / "openclaw" / "tasks",
             self.cache_dir(user.id),
             self.tmp_dir(user.id),
-        ):
+        )
+        for path in runtime_directories:
             path.mkdir(parents=True, exist_ok=True)
 
         token = self._ensure_env(user.id)
@@ -66,7 +68,28 @@ class OpenClawUserRuntimeService(
         self._ensure_notepatch_skills(user.id)
         self._write_notepatch_runtime(user.id, user=user, workspace=workspace)
         self._write_compose(user.id)
-        self._ensure_runtime_permissions(user.id)
+        if existing_runtime:
+            self._ensure_runtime_entry_permissions(
+                (
+                    user_root,
+                    *runtime_directories,
+                    self.env_path(user.id),
+                    self.openclaw_json_path(user.id),
+                    self.auth_profiles_path(user.id),
+                    self.notepatch_runtime_path(user.id),
+                    self.compose_path(user.id),
+                    *(
+                        path
+                        for skill_id in NOTEPATCH_SKILLS
+                        for path in (
+                            self.skills_dir(user.id) / skill_id,
+                            self.skills_dir(user.id) / skill_id / "SKILL.md",
+                        )
+                    ),
+                )
+            )
+        else:
+            self._ensure_runtime_permissions(user.id)
         return {
             "user_root": str(user_root),
             "home_dir": str(self.home_dir(user.id)),
@@ -95,6 +118,16 @@ class OpenClawUserRuntimeService(
         if not output_dir.exists():
             return []
         return [path for path in output_dir.rglob("*") if path.is_file()]
+
+    def cleanup_task_context(self, db: Session, workspace_id: str, task_id: str) -> None:
+        workspace = db.get(Workspace, workspace_id)
+        if workspace is None:
+            return
+        task_root = self.task_input_dir(workspace.owner_user_id, task_id).parent
+        expected_parent = self.notepatch_root(workspace.owner_user_id) / "openclaw" / "tasks"
+        if task_root.parent.resolve() != expected_parent.resolve():
+            raise OpenClawUserRuntimeError("Task context path escaped the user runtime")
+        shutil.rmtree(task_root, ignore_errors=True)
 
 
 __all__ = ["NOTEPATCH_SKILLS", "OpenClawUserRuntimeError", "OpenClawUserRuntimeService"]

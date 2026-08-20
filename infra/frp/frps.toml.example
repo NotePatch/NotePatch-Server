@@ -1,0 +1,11 @@
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+transport.tls.force = true
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/server_token"
+allowPorts = [
+  { start = 80, end = 80 },
+  { start = 443, end = 443 }
+]

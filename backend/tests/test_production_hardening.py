@@ -1,8 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
+from notepatch.modules.documents.models.document import Document, DocumentArtifact
+from notepatch.modules.documents.services.task_handlers import process_scan_document
 from notepatch.modules.documents.services.scanner import (
     DocumentScanError,
     DocumentScanner,
@@ -14,9 +17,43 @@ from notepatch.modules.learning.services.html_notes import validate_note_structu
 from notepatch.modules.learning.services.note_render import NoteRenderService
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.tasks.services.task import TaskService
-from notepatch.platform.config import get_settings
+from notepatch.platform.config import Settings, get_settings
 from tests.conftest import auth_headers, first_workspace_id, register_user
 from tests.test_doctr_worker import PNG_BYTES
+
+
+def test_public_path_prefix_validates_and_builds_note_urls():
+    prefix = "/np-0123456789abcdef0123456789abcdef"
+    settings = Settings(
+        _env_file=None,
+        public_path_prefix=prefix,
+        public_api_base_url="",
+        secret_key="test-secret-key-with-at-least-32-bytes",
+    )
+    assert settings.public_route_url("/api/v1/health") == f"{prefix}/api/v1/health"
+
+    note = SimpleNamespace(
+        id="note-id",
+        workspace_id="workspace-id",
+        learning_unit_id="unit-id",
+        title="Public note",
+    )
+    renderer = NoteRenderService(settings)
+    assert renderer.create_url(note).startswith(f"{prefix}/api/v1/assets/study-notes/render?")
+    assert f'href="{prefix}/api/v1/assets/note-themes/notepatch-paper-v1.css"' in renderer.wrap_html(
+        note, "<article>Note</article>"
+    )
+
+    absolute = Settings(
+        _env_file=None,
+        public_path_prefix=prefix,
+        public_api_base_url=f"https://8.137.78.255{prefix}",
+    )
+    assert absolute.public_route_url("/api/v1/health") == (
+        f"https://8.137.78.255{prefix}/api/v1/health"
+    )
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, public_path_prefix="/predictable")
 
 
 def test_versioned_note_theme_is_public_and_immutable(client):
@@ -94,6 +131,114 @@ def test_document_scanner_hashes_detects_and_rejects_mime(tmp_path, monkeypatch)
         with pytest.raises(ScannerUnavailableError):
             DocumentScanner().scan(path, "image/png")
     finally:
+        settings.clamav_enabled = old_clamav
+
+
+def test_disabled_scan_task_skips_storage_and_releases_chat_attachment(
+    client, db_sessionmaker, fake_storage, monkeypatch
+):
+    settings = get_settings()
+    old_auto = settings.auto_learning_pipeline
+    old_clamav = settings.clamav_enabled
+    settings.auto_learning_pipeline = True
+    settings.clamav_enabled = False
+    try:
+        user = register_user(client, "scan-disabled@example.com")
+        workspace_id = first_workspace_id(client, user["access_token"])
+        owner_id = client.get("/api/v1/auth/me", headers=auth_headers(user["access_token"])).json()["id"]
+        with db_sessionmaker() as db:
+            document = Document(
+                workspace_id=workspace_id,
+                uploaded_by=owner_id,
+                title="Chat image",
+                original_filename="chat.png",
+                mime_type="image/png",
+                file_size=128,
+                file_type="image",
+                document_kind="chat_attachment",
+                storage_backend="seaweedfs",
+                bucket=fake_storage.bucket,
+                object_key=f"workspaces/{workspace_id}/documents/test/original/chat.png",
+                status="scanning",
+                scan_status="pending",
+            )
+            db.add(document)
+            db.flush()
+            artifact = DocumentArtifact(
+                workspace_id=workspace_id,
+                document_id=document.id,
+                artifact_type="original",
+                bucket=document.bucket,
+                object_key=document.object_key,
+                mime_type=document.mime_type,
+                file_size=document.file_size,
+                metadata_={"source": "tusd"},
+            )
+            db.add(artifact)
+            task, _ = TaskService(db).create_task_record(
+                workspace_id=workspace_id,
+                task_type="scan_document",
+                resource_type="document",
+                resource_id=document.id,
+                payload={"document_id": document.id},
+            )
+            db.commit()
+            task = TaskService(db).claim_task(task.id)
+            assert task is not None
+
+            def fail_download(*args, **kwargs):
+                raise AssertionError("disabled scanning must not download the object")
+
+            monkeypatch.setattr(fake_storage, "download_file", fail_download)
+            process_scan_document(db, TaskService(db), task, fake_storage)
+
+            db.refresh(document)
+            db.refresh(artifact)
+            db.refresh(task)
+            assert document.status == "ready"
+            assert document.scan_status == "skipped"
+            assert document.sha256 is None
+            assert document.detected_mime_type is None
+            assert artifact.metadata_["scanner"] == "disabled"
+            assert task.status == "succeeded"
+            assert any(event.event_type == "scan_skipped" for event in task.events)
+
+            infected = Document(
+                workspace_id=workspace_id,
+                uploaded_by=owner_id,
+                title="Rejected image",
+                original_filename="infected.png",
+                mime_type="image/png",
+                file_size=128,
+                file_type="image",
+                document_kind="chat_attachment",
+                storage_backend="seaweedfs",
+                bucket=fake_storage.bucket,
+                object_key=f"workspaces/{workspace_id}/documents/infected/original/image.png",
+                status="failed",
+                scan_status="infected",
+                scan_message="Malware detected",
+            )
+            db.add(infected)
+            db.flush()
+            infected_task, _ = TaskService(db).create_task_record(
+                workspace_id=workspace_id,
+                task_type="scan_document",
+                resource_type="document",
+                resource_id=infected.id,
+                payload={"document_id": infected.id},
+            )
+            db.commit()
+            infected_task = TaskService(db).claim_task(infected_task.id)
+            assert infected_task is not None
+            process_scan_document(db, TaskService(db), infected_task, fake_storage)
+            db.refresh(infected)
+            db.refresh(infected_task)
+            assert infected.status == "failed"
+            assert infected.scan_status == "infected"
+            assert infected_task.status == "failed"
+    finally:
+        settings.auto_learning_pipeline = old_auto
         settings.clamav_enabled = old_clamav
 
 

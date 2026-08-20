@@ -1,5 +1,7 @@
 from functools import lru_cache
+import re
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
     refresh_token_rotation_grace_seconds: int = 10
+    identity_idempotency_ttl_seconds: int = 86400
+    avatar_storage_backend: str = "seaweedfs"
+    avatar_local_root: str | None = None
+    user_avatar_max_size_mb: int = 5
+    user_avatar_max_dimension: int = 4096
     admin_emails: str = ""
     admin_web_origin: str = "http://localhost:5173"
 
@@ -22,9 +29,11 @@ class Settings(BaseSettings):
     default_queue_name: str = "default"
     ocr_queue_name: str = "ocr"
     chat_queue_name: str = "chat"
+    ai_queue_name: str = "ai"
     worker_queues: str = "default"
     ocr_worker_queues: str = "ocr"
     chat_worker_queues: str = "chat"
+    ai_worker_queues: str = "ai"
     presence_heartbeat_interval_seconds: int = 30
     presence_session_ttl_seconds: int = 90
     presence_offline_grace_seconds: int = 600
@@ -54,6 +63,7 @@ class Settings(BaseSettings):
     s3_secure: bool = False
     presign_expire_seconds: int = 3600
     public_api_base_url: str = ""
+    public_path_prefix: str = ""
     backend_cors_origins: str = "*"
 
     tusd_base_url: str = "http://localhost:1080/files/"
@@ -93,7 +103,7 @@ class Settings(BaseSettings):
     openclaw_user_runtime_uid: int = 1000
     openclaw_user_runtime_gid: int = 1000
     openclaw_docker_socket_gid: int | None = None
-    openclaw_supervisor_poll_seconds: float = 10
+    openclaw_supervisor_poll_seconds: float = 5
     openclaw_supervisor_container_stop_timeout_seconds: int = 20
     openclaw_gateway_memory_limit: str = "2g"
     openclaw_gateway_nano_cpus: int = 1_500_000_000
@@ -106,6 +116,17 @@ class Settings(BaseSettings):
     ai_provider_timeout_seconds: float = 15
     ai_model_allowlist: str = ""
     ai_chat_history_message_limit: int = 20
+    ai_chat_auto_title_enabled: bool = True
+    ai_chat_title_model: str = "openai/gpt-5.4-mini"
+    ai_chat_title_fallback_locale: str = "zh-CN"
+    ai_chat_title_message_limit: int = 6
+    ai_chat_title_max_length: int = 40
+    ai_chat_title_timeout_seconds: float = 30
+    ai_chat_stream_flush_milliseconds: int = 250
+    ai_chat_stream_chunk_max_chars: int = 1024
+    ai_chat_stream_max_reasoning_chars: int = 32_768
+    ai_chat_stream_max_answer_chars: int = 131_072
+    ai_chat_cancel_poll_seconds: float = 0.25
     study_note_debounce_seconds: int = 300
     knowledge_point_match_threshold: float = 0.88
     flashcard_error_half_life_days: float = 30.0
@@ -157,13 +178,25 @@ class Settings(BaseSettings):
     metrics_token: str | None = None
     release_revision: str = "dev"
     release_build_time: str = "unknown"
-    schema_revision: str = "202608140002"
+    schema_revision: str = "202608200001"
     rate_limit_enabled: bool = False
     auth_rate_limit_per_minute: int = 20
     upload_rate_limit_per_minute: int = 30
     ai_rate_limit_per_minute: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @field_validator("public_path_prefix")
+    @classmethod
+    def validate_public_path_prefix(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return ""
+        if not re.fullmatch(r"/np-[0-9a-f]{32}", normalized):
+            raise ValueError(
+                "PUBLIC_PATH_PREFIX must match /np- followed by 32 lowercase hex characters"
+            )
+        return normalized
 
     @property
     def cors_origins(self) -> list[str]:
@@ -214,6 +247,13 @@ class Settings(BaseSettings):
     @property
     def storage_public_base_url(self) -> str:
         return self.seaweedfs_public_base_url or self.storage_endpoint_url
+
+    def public_route_url(self, path: str) -> str:
+        route = "/" + path.lstrip("/")
+        base = self.public_api_base_url.rstrip("/")
+        if base:
+            return f"{base}{route}"
+        return f"{self.public_path_prefix}{route}"
 
 
 @lru_cache

@@ -96,6 +96,16 @@ class OpenClawRuntimeConfig:
         defaults.update(managed["agents"]["defaults"])
         payload["tools"] = managed["tools"]
         if models:
+            existing_definitions = (
+                (((payload.get("models") or {}).get("providers") or {}).get("openai") or {}).get("models")
+                or []
+            )
+            definitions = models["providers"]["openai"]["models"]
+            known_ids = {item.get("id") for item in definitions if isinstance(item, dict)}
+            for item in existing_definitions:
+                if isinstance(item, dict) and item.get("id") not in known_ids:
+                    definitions.append(item)
+                    known_ids.add(item.get("id"))
             payload["models"] = models
         else:
             providers = (payload.get("models") or {}).get("providers")
@@ -116,6 +126,7 @@ class OpenClawRuntimeConfig:
     ) -> list[dict]:
         configured = [
             self.settings.openclaw_agent_model,
+            self.settings.ai_chat_title_model,
             getattr(user, "preferred_ai_model", None),
             *(model_ids or ()),
         ]

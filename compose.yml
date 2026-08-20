@@ -8,7 +8,7 @@ x-backend: &backend
     args:
       RELEASE_REVISION: ${GIT_SHA:-dev}
       RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
-      SCHEMA_REVISION: 202608140002
+      SCHEMA_REVISION: 202608200001
   env_file:
     - path: .env
       required: false
@@ -17,7 +17,8 @@ x-backend: &backend
     OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
     OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
     PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-}
-    CLAMAV_ENABLED: ${CLAMAV_ENABLED:-true}
+    PUBLIC_PATH_PREFIX: ${PUBLIC_PATH_PREFIX:-}
+    CLAMAV_ENABLED: ${CLAMAV_ENABLED:-false}
     RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
   extra_hosts:
     - host.docker.internal:host-gateway
@@ -32,6 +33,7 @@ services:
     volumes:
       - tusd_data:/tusd-data:ro
       - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/avatars:${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/avatars
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,7 +58,29 @@ services:
       OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
       OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
       WORKER_QUEUES: default
-      CLAMAV_ENABLED: ${CLAMAV_ENABLED:-true}
+      CLAMAV_ENABLED: ${CLAMAV_ENABLED:-false}
+    volumes:
+      - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/avatars:${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/avatars
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+
+  chat-worker:
+    <<: *backend
+    command: python -m notepatch.entrypoints.worker
+    restart: unless-stopped
+    environment:
+      NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
+      OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
+      OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
+      WORKER_QUEUES: ${CHAT_WORKER_QUEUES:-chat}
     volumes:
       - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
     depends_on:
@@ -68,10 +92,8 @@ services:
         condition: service_started
       embedding-service:
         condition: service_started
-      clamav:
-        condition: service_healthy
 
-  chat-worker:
+  ai-worker:
     <<: *backend
     command: python -m notepatch.entrypoints.worker
     restart: unless-stopped
@@ -79,7 +101,7 @@ services:
       NOTEPATCH_DATA_ROOT: ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}
       OPENCLAW_ASSET_ROOT: /opt/notepatch/openclaw
       OPENCLAW_USER_RUNTIME_ROOT: ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
-      WORKER_QUEUES: ${CHAT_WORKER_QUEUES:-chat}
+      WORKER_QUEUES: ${AI_WORKER_QUEUES:-ai}
     volumes:
       - ${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}:${OPENCLAW_USER_RUNTIME_ROOT:-/home/usr/notepatch-data/openclaw}
     depends_on:
@@ -167,7 +189,7 @@ services:
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/models/doctr:/opt/notepatch/services/doctr/vendor/DocTr/model_pretrained:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:8000/healthz'); assert b'weights_ready' in r.read()"]
+      test: ["CMD", "python", "-c", "import torch, urllib.request; assert torch.cuda.is_available() and torch.cuda.device_count() > 0; r=urllib.request.urlopen('http://localhost:8000/healthz'); assert b'weights_ready' in r.read()"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -188,7 +210,7 @@ services:
     volumes:
       - bge-cache:/models/huggingface
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      test: ["CMD", "python", "-c", "import torch, urllib.request; assert torch.cuda.is_available() and torch.cuda.device_count() > 0; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -210,6 +232,8 @@ services:
       retries: 10
 
   clamav:
+    profiles:
+      - security
     image: clamav/clamav:1.4
     restart: unless-stopped
     mem_limit: 2g
@@ -229,7 +253,8 @@ services:
       context: .
       dockerfile: infra/docker/admin.Dockerfile
       args:
-        VITE_API_BASE_URL: /api/v1
+        VITE_API_BASE_URL: ${PUBLIC_PATH_PREFIX:-}/api/v1
+        VITE_PUBLIC_PATH_PREFIX: ${PUBLIC_PATH_PREFIX:-/}
     restart: unless-stopped
     ports:
       - "0.0.0.0:${ADMIN_WEB_PORT:-5173}:80"
@@ -252,7 +277,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       RESTIC_REPOSITORY: /backups/restic
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
-      SCHEMA_REVISION: 202608140002
+      SCHEMA_REVISION: 202608200001
       RELEASE_REVISION: ${GIT_SHA:-dev}
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups

@@ -3,12 +3,14 @@ import base64
 import json
 from pathlib import Path, PurePosixPath
 import re
+import threading
 import time
+from collections.abc import Callable
 
 import httpx
 
 from notepatch.platform.config import get_settings
-from notepatch.platform.errors import RetryableTaskError
+from notepatch.platform.errors import RetryableTaskError, TaskCancelledError
 
 
 class OpenClawRunnerError(RetryableTaskError):
@@ -31,6 +33,38 @@ class OpenClawRunner(ABC):
     @abstractmethod
     def cleanup(self, workspace_id: str, task_id: str) -> None:
         raise NotImplementedError
+
+    def generate_conversation_title(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        messages: list[dict[str, str]],
+        *,
+        runtime: dict,
+        provider_model: str,
+        client_locale: str,
+        max_length: int,
+        timeout_seconds: float,
+    ) -> str | None:
+        return None
+
+    def run_chat_task(
+        self,
+        workspace_id: str,
+        task_id: str,
+        payload: dict,
+        *,
+        on_stream_event: Callable[[str, str], None] | None = None,
+        is_cancel_requested: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Run a chat task.
+
+        Non-gateway fakes deliberately retain the regular task contract. The
+        task handler turns their final answer into one persisted stream delta.
+        """
+        if is_cancel_requested and is_cancel_requested():
+            raise TaskCancelledError("Task cancellation was requested")
+        return self.run_task(workspace_id, task_id, payload)
 
 
 class LocalTaskDirMixin:
@@ -113,6 +147,120 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         )
         return result
 
+    def run_chat_task(
+        self,
+        workspace_id: str,
+        task_id: str,
+        payload: dict,
+        *,
+        on_stream_event: Callable[[str, str], None] | None = None,
+        is_cancel_requested: Callable[[], bool] | None = None,
+    ) -> dict:
+        task_dir = self.prepare_task_dir(workspace_id, task_id)
+        runtime = payload.get("_openclaw") if isinstance(payload.get("_openclaw"), dict) else {}
+        gateway_url = self._gateway_url(runtime)
+        gateway_token = runtime.get("gateway_token") if isinstance(runtime.get("gateway_token"), str) else None
+        output_dir = runtime.get("host_task_output_dir") if isinstance(runtime.get("host_task_output_dir"), str) else None
+        if output_dir:
+            self._task_output_dirs[(workspace_id, task_id)] = Path(output_dir)
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+        request_body = self._build_request_body(payload)
+        request_body["stream"] = True
+        request_body.update(self._thinking_request_options(payload))
+        provider_model = self._provider_model(payload)
+        session_key = runtime.get("session_key") if isinstance(runtime.get("session_key"), str) else None
+        timeout_seconds = self._request_timeout_seconds(runtime)
+        answer, reasoning = self._stream_chat_completion(
+            request_body,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            session_key=session_key,
+            provider_model=provider_model,
+            timeout_seconds=timeout_seconds,
+            on_stream_event=on_stream_event,
+            is_cancel_requested=is_cancel_requested,
+        )
+        self._raise_embedded_gateway_error(answer)
+        result = {
+            "runner": "gateway",
+            "answer": answer,
+            "reasoning_summary": reasoning,
+            "model": request_body["model"],
+            "gateway_model": request_body["model"],
+            "provider_model": provider_model,
+            "gateway_url": gateway_url,
+            "gateway_container": runtime.get("gateway_container"),
+            "user_workspace_dir": runtime.get("user_workspace_dir"),
+        }
+        result_path = (Path(output_dir) if output_dir else task_dir / "output") / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+    def generate_conversation_title(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        messages: list[dict[str, str]],
+        *,
+        runtime: dict,
+        provider_model: str,
+        client_locale: str,
+        max_length: int,
+        timeout_seconds: float,
+    ) -> str | None:
+        transcript = [
+            {
+                "role": item["role"],
+                "content": item["content"][:1200],
+            }
+            for item in messages
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        ]
+        if not transcript:
+            return None
+        gateway_url = self._gateway_url(runtime)
+        gateway_token = runtime.get("gateway_token") if isinstance(runtime.get("gateway_token"), str) else None
+        title_instruction = (
+            "This is a title-generation task, not a request to continue or answer the conversation. "
+            "Determine the dominant language using only user-role messages and write a concise noun-phrase "
+            "title in that language. If the user text is too short, mixed-language, or otherwise ambiguous, "
+            f"use the client locale {client_locale}. Use at most {max_length} characters. "
+            "Return only the title. Never answer the transcript, acknowledge the request, narrate your intent, "
+            "use first person, add quotes, terminal punctuation, Markdown, a prefix, or an explanation."
+        )
+        request_body = {
+            "model": self._gateway_request_model({}),
+            "stream": False,
+            "reasoning_effort": "none",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": title_instruction,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{title_instruction}\n\n"
+                        "Conversation transcript JSON:\n"
+                        f"{json.dumps(transcript, ensure_ascii=False)}\n\n"
+                        "Title only:"
+                    ),
+                },
+            ],
+        }
+        response_json = self._post_chat_completion(
+            request_body,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            session_key=f"notepatch:{workspace_id}:chat-title:{conversation_id}",
+            provider_model=provider_model,
+            timeout_seconds=timeout_seconds,
+        )
+        title = self._extract_answer(response_json).strip()
+        self._raise_embedded_gateway_error(title)
+        return title or None
+
     def collect_output(self, workspace_id: str, task_id: str) -> dict:
         output_dir = self._task_output_dirs.get((workspace_id, task_id))
         if output_dir is None:
@@ -157,11 +305,25 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
             message_content = [{"type": "text", "text": user_content}, *image_parts]
 
         messages[current_user_index] = {"role": "user", "content": message_content}
-        return {
+        request_body = {
             "model": model,
             "stream": False,
             "messages": messages,
         }
+        temperature = options.get("temperature")
+        if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+            request_body["temperature"] = float(temperature)
+        return request_body
+
+    @staticmethod
+    def _thinking_request_options(payload: dict) -> dict[str, str]:
+        options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+        thinking = options.get("thinking") if isinstance(options.get("thinking"), dict) else {}
+        enabled = bool(thinking.get("enabled"))
+        effort = thinking.get("effort") if isinstance(thinking.get("effort"), str) else "low"
+        if not enabled:
+            return {"reasoning_effort": "none", "reasoning_mode": "off"}
+        return {"reasoning_effort": effort, "reasoning_mode": "stream"}
 
     @staticmethod
     def _conversation_messages(payload: dict) -> list[dict[str, str]]:
@@ -316,6 +478,125 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         if not isinstance(parsed, dict):
             raise OpenClawRunnerError("OpenClaw gateway returned an invalid JSON response")
         return parsed
+
+    def _stream_chat_completion(
+        self,
+        request_body: dict,
+        *,
+        gateway_url: str,
+        gateway_token: str | None,
+        session_key: str | None,
+        provider_model: str | None,
+        timeout_seconds: float,
+        on_stream_event: Callable[[str, str], None] | None,
+        is_cancel_requested: Callable[[], bool] | None,
+    ) -> tuple[str, str]:
+        self._wait_until_ready(gateway_url)
+        url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
+        if is_cancel_requested and is_cancel_requested():
+            raise TaskCancelledError("Task cancellation was requested")
+        stop_watcher = threading.Event()
+        cancelled = threading.Event()
+        response_holder: dict[str, httpx.Response] = {}
+
+        def watch_cancellation() -> None:
+            while not stop_watcher.wait(max(self.settings.ai_chat_cancel_poll_seconds, 0.05)):
+                if is_cancel_requested and is_cancel_requested():
+                    cancelled.set()
+                    response = response_holder.get("response")
+                    if response is not None:
+                        response.close()
+                    return
+
+        watcher = threading.Thread(target=watch_cancellation, name=f"chat-cancel-{session_key or 'task'}", daemon=True)
+        answer_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        try:
+            with self._client.stream(
+                "POST",
+                url,
+                headers={**self._headers(gateway_token, session_key, provider_model), "Accept": "text/event-stream"},
+                json=request_body,
+                timeout=timeout_seconds,
+            ) as response:
+                response_holder["response"] = response
+                if response.status_code < 200 or response.status_code >= 300:
+                    detail = response.read().decode("utf-8", errors="replace")[:500]
+                    raise OpenClawRunnerError(f"OpenClaw gateway returned HTTP {response.status_code}: {detail}")
+                watcher.start()
+                for line in response.iter_lines():
+                    if cancelled.is_set() or (is_cancel_requested and is_cancel_requested()):
+                        raise TaskCancelledError("Task cancellation was requested")
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(raw)
+                    except ValueError as exc:
+                        raise OpenClawRunnerError("OpenClaw gateway returned invalid stream JSON") from exc
+                    self._raise_stream_error(event)
+                    for stream, delta in self._stream_deltas(event):
+                        if stream == "answer":
+                            answer_parts.append(delta)
+                        else:
+                            reasoning_parts.append(delta)
+                        if on_stream_event is not None:
+                            on_stream_event(stream, delta)
+        except TaskCancelledError:
+            raise
+        except httpx.TimeoutException as exc:
+            if cancelled.is_set():
+                raise TaskCancelledError("Task cancellation was requested") from exc
+            raise OpenClawRunnerError(f"OpenClaw gateway request timed out: {url}") from exc
+        except httpx.HTTPError as exc:
+            if cancelled.is_set() or (is_cancel_requested and is_cancel_requested()):
+                raise TaskCancelledError("Task cancellation was requested") from exc
+            raise OpenClawRunnerError(f"OpenClaw gateway stream failed: {exc}") from exc
+        finally:
+            stop_watcher.set()
+            if watcher.is_alive():
+                watcher.join(timeout=1)
+        if cancelled.is_set() or (is_cancel_requested and is_cancel_requested()):
+            raise TaskCancelledError("Task cancellation was requested")
+        answer = "".join(answer_parts)
+        if not answer.strip():
+            raise OpenClawRunnerError("OpenClaw gateway stream returned no answer")
+        return answer, "".join(reasoning_parts)
+
+    @staticmethod
+    def _raise_stream_error(event: object) -> None:
+        if not isinstance(event, dict):
+            return
+        error = event.get("error")
+        if not isinstance(error, dict):
+            return
+        message = error.get("message")
+        detail = message.strip()[:500] if isinstance(message, str) and message.strip() else "unknown gateway error"
+        raise OpenClawRunnerError(f"OpenClaw gateway stream error: {detail}")
+
+    @staticmethod
+    def _stream_deltas(event: object) -> list[tuple[str, str]]:
+        if not isinstance(event, dict):
+            return []
+        choices = event.get("choices")
+        if not isinstance(choices, list):
+            return []
+        deltas: list[tuple[str, str]] = []
+        for choice in choices:
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                deltas.append(("answer", content))
+            for key in ("reasoning_content", "reasoning_summary", "reasoning"):
+                reasoning = delta.get(key)
+                if isinstance(reasoning, str) and reasoning:
+                    deltas.append(("reasoning", reasoning))
+                    break
+        return deltas
 
     def _request_timeout_seconds(self, runtime: dict) -> float:
         value = runtime.get("timeout_seconds")

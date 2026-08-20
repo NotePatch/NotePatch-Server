@@ -1,0 +1,21 @@
+serverAddr = "8.137.78.255"
+serverPort = 7000
+
+transport.tls.enable = true
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "/etc/frp/client_token"
+
+[[proxies]]
+name = "notepatch-http"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 80
+remotePort = 80
+
+[[proxies]]
+name = "notepatch-https"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 443
+remotePort = 443

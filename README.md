@@ -65,8 +65,7 @@ curl http://localhost:8001/health
 - Admin Web: `http://localhost:5173`
 - tusd: `http://localhost:1080/files/`
 - SeaweedFS S3: `http://localhost:8333`
-- SeaweedFS filer UI: `http://localhost:8888`
-- SeaweedFS master UI: `http://localhost:9333`
+- SeaweedFS filer/master: Compose 内网服务，不发布宿主端口
 
 前端接入说明见 [docs/frontend-integration.md](docs/frontend-integration.md)。
 
@@ -89,9 +88,11 @@ REDIS_TASK_QUEUE=notepatch:tasks
 DEFAULT_QUEUE_NAME=default
 OCR_QUEUE_NAME=ocr
 CHAT_QUEUE_NAME=chat
+AI_QUEUE_NAME=ai
 WORKER_QUEUES=default
 OCR_WORKER_QUEUES=ocr
 CHAT_WORKER_QUEUES=chat
+AI_WORKER_QUEUES=ai
 
 SEAWEEDFS_S3_ENDPOINT=http://seaweedfs-s3:8333
 SEAWEEDFS_ACCESS_KEY=notepatch
@@ -132,6 +133,21 @@ OPENAI_API_KEY=
 # Optional OpenAI-compatible endpoint. Empty uses OpenAI's default API base URL.
 OPENAI_BASE_URL=
 AI_CHAT_HISTORY_MESSAGE_LIMIT=20
+AI_CHAT_AUTO_TITLE_ENABLED=true
+AI_CHAT_TITLE_MODEL=openai/gpt-5.4-mini
+AI_CHAT_TITLE_FALLBACK_LOCALE=zh-CN
+AI_CHAT_TITLE_MESSAGE_LIMIT=6
+AI_CHAT_TITLE_MAX_LENGTH=40
+AI_CHAT_TITLE_TIMEOUT_SECONDS=30
+
+OpenClaw Gateway 的 sandbox 会通过宿主 Docker daemon 创建隔离容器，因此 Gateway 镜像必须同时包含 Docker CLI。统一使用仓库脚本构建，避免出现 Gateway HTTP 200 但 SSE 无回答：
+
+```bash
+OPENCLAW_SOURCE_DIR=/home/usr/openclaw ./scripts/build_openclaw_gateway.sh
+docker compose up -d openclaw-supervisor chat-worker
+```
+
+脚本固定传入 `OPENCLAW_INSTALL_DOCKER_CLI=1`，并在构建后执行 `docker --version` 预检。仅挂载 `/var/run/docker.sock` 不够；镜像缺少 CLI 时 OpenClaw 会在启动 sandbox 前失败。
 
 DOCTR_ENABLED=true
 DOCTR_BASE_URL=http://docserver:8000
@@ -235,6 +251,33 @@ docker compose exec api alembic upgrade head
 - 删除非 owner membership，并给 `workspaces.owner_user_id` 加唯一约束
 
 ## Auth And Workspace
+
+用户资料使用独立的版本化写接口：
+
+```http
+GET    /api/v1/user/profile
+PUT    /api/v1/user/profile
+POST   /api/v1/user/avatar/upload
+GET    /api/v1/user/avatar/download-url
+GET    /api/v1/user/avatar/content
+DELETE /api/v1/user/avatar
+```
+
+`GET /user/profile` 返回 `ETag: "profile-{profile_version}"`。所有资料和头像写请求必须回传该值作为 `If-Match`，并提供 8-128 字符的 `Idempotency-Key`。同一 key 和相同请求会复用原结果；同一 key 配不同内容返回 `409`；资料版本已变化返回 `412`。邮箱变更还必须提交 `current_password`，成功后旧 access/refresh token 全部失效，客户端应清空 token 并重新登录。头像只接受实际可解码的 JPEG/PNG，默认最大 5 MB；默认写入 SeaweedFS，`AVATAR_STORAGE_BACKEND=local` 时写入 `${NOTEPATCH_DATA_ROOT}/avatars`。
+
+相关部署配置：
+
+```env
+IDENTITY_IDEMPOTENCY_TTL_SECONDS=86400
+AVATAR_STORAGE_BACKEND=seaweedfs
+AVATAR_LOCAL_ROOT=
+USER_AVATAR_MAX_SIZE_MB=5
+USER_AVATAR_MAX_DIMENSION=4096
+```
+
+部署该功能前必须执行 `alembic upgrade head`，使数据库达到 revision `202608200001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
+
+这些新接口返回统一 envelope：`{"code":"ok","message":"...","data":{...}}`。现有 task、document 和 chat 创建接口保持原响应结构。
 
 注册：
 
@@ -460,9 +503,9 @@ tusd /data volume -> api /tusd-data:ro -> SeaweedFS S3
 
 ## OpenClaw Gateway Runner
 
-`POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口，会创建 `openclaw_agent_run` 异步任务。请求体使用 `prompt`、可选 `conversation_id`、可选 `input` 和可选 `options`；不传 `conversation_id` 时会自动创建会话。响应 task payload 包含 conversation 和 message id，客户端通过 task 状态、events 以及会话消息接口获取最终 answer 或失败原因。注册用户时，notepatch 会为该用户生成一套独立 OpenClaw runtime 配置：
+`POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口，会创建 `openclaw_agent_run` 异步任务。请求体使用 `prompt`、可选 BCP 47 `client_locale`、可选 `conversation_id`、可选 `input` 和可选 `options`；不传 `conversation_id` 时会自动创建会话。未传 locale 时依次使用 `Accept-Language` 和部署 fallback。响应 task payload 包含 conversation、message id 和 locale 快照，客户端通过 task 状态、events 以及会话消息接口获取最终 answer 或失败原因。注册用户时，notepatch 会为该用户生成一套独立 OpenClaw runtime 配置：
 
-聊天图片通过 `input.attachments=[{"document_id":"..."}]` 引用已完成上传的 workspace 文档。后端不信任客户端文件名或 MIME，会按 `workspace_id + document_id` 重新校验并把规范化附件保存到 user message。后续轮次启用历史时，会把附件重新绑定到当前 task 的独立 OpenClaw 快照路径；原图仍以 SeaweedFS 中的 Document 为唯一持久化来源。
+聊天图片通过 `input.attachments=[{"document_id":"..."}]` 引用已完成上传的文档。创建 `chat_attachment` 上传会话时可设置 `save_to_documents`：默认 `true` 会保留为 workspace 文档；设为 `false` 时只绑定首次引用它的 conversation，不进入普通文档列表或学习 Skill 的资料镜像，并在删除会话时异步 purge。临时附件仍存放于 SeaweedFS，区别是生命周期归属会话。后端不信任客户端文件名或 MIME，会按 `workspace_id + document_id` 重新校验并把规范化附件保存到 user message。后续轮次启用历史时，会把附件重新绑定到当前 task 的独立 OpenClaw 快照路径。
 
 聊天历史保存在 PostgreSQL，可通过以下接口管理：
 
@@ -478,6 +521,14 @@ PUT    /workspaces/{workspace_id}/ai/model {"model_id": "openai/model-id" | null
 ```
 
 `ai_history_enabled` 是用户全局开关，默认开启。关闭后历史仍可回看，但 worker 不会把它带入后续 OpenClaw 请求；开启时每次最多传入 `AI_CHAT_HISTORY_MESSAGE_LIMIT`（默认 20）条成功消息。它不写入或修改 OpenClaw `MEMORY.md`，后者仍是独立的 agent 长期记忆机制。
+
+新会话先使用首条 prompt 作为临时标题。聊天回答成功落库后，worker 使用独立 OpenClaw title session 和固定低成本模型 `AI_CHAT_TITLE_MODEL`，关闭思考并根据前 `AI_CHAT_TITLE_MESSAGE_LIMIT` 条成功消息生成不超过 `AI_CHAT_TITLE_MAX_LENGTH` 字符的标题。标题优先采用用户消息的主要语言；消息太短、混合或无法判断时使用 task 中的 `client_locale`。标题调用失败不会回退到昂贵主模型，也不会让聊天任务失败；用户手动改名后自动标题永久停止覆盖该会话。
+
+聊天任务通过已有的 task SSE 接口流式回传：`GET /api/v1/workspaces/{workspace_id}/tasks/{task_id}/events/stream`。`chat_answer_delta` 的 `data.stream` 为 `answer`；启用消息级思考后，`chat_reasoning_delta` 的 `data.stream` 为 `reasoning`，它只包含后端规范化后的安全进度摘要，不包含模型隐藏思维或原始推理文本。客户端使用 `sequence_no` / `Last-Event-ID` 续传，收到新的 `chat_stream_started` 时清空本次草稿；完成后仍以 task result 和 assistant message 为准。每条消息可传：`{"options":{"temperature":0.7,"thinking":{"enabled":true,"effort":"low"}}}`。`temperature` 范围为 `0..2`，只作用当前 task；思考强度支持 `minimal`、`low`、`medium`、`high`、`adaptive`，默认关闭。
+
+用户可调用 `POST /api/v1/workspaces/{workspace_id}/tasks/{task_id}/cancel` 终止自己的进行中聊天任务。queued 任务立即变为 `cancelled`，running 任务会中断 gateway 流；已经接收的回答正文会保留在 assistant message 中并标记为 `cancelled`。此接口不接受非聊天 task，也不能取消其他用户会话的任务。
+
+历史 user message 可通过 `POST /api/v1/workspaces/{workspace_id}/ai/conversations/{conversation_id}/messages/{message_id}/revisions` 修改并重新生成。后端保留旧记录但把目标消息及后续旧分支标记为 superseded；默认 messages 列表只返回当前分支，运维审计可使用 `include_superseded=true`。修订接口返回 envelope，新的异步 task 位于 `data`。
 
 模型目录接口由 FastAPI 使用部署级凭据请求 `${OPENAI_BASE_URL}/models`，前端不会接触 provider key。`PUT /ai/model` 保存用户全局模型偏好；传 `null` 恢复 `OPENCLAW_AGENT_MODEL`。该选择影响随后创建的聊天、知识库、题目提取、学霸笔记、批改、高亮和闪卡任务。任务首次执行时会把实际模型固化到 `task.payload.ai_model`，因此重试不会因用户中途切换模型而漂移。目录默认缓存 300 秒；provider 临时不可用时可返回最后一次成功目录并标记 `stale=true`。
 
@@ -561,6 +612,8 @@ workspaces/{workspace_id}/sandbox/tasks/{task_id}/output/...
 
 如果该用户刚上线但 gateway 还在启动，runner 会先轮询 `/healthz` 等待 ready。聊天请求使用 `OPENCLAW_GATEWAY_TIMEOUT_SECONDS`，较长的学习 Skill 使用独立的 `OPENCLAW_SKILL_TIMEOUT_SECONDS`（默认 300 秒）；同一任务重试时会复用已落盘且通过 schema 校验的迟到输出。若 gateway 未能启动、token 不正确、provider key 缺失、返回非 2xx 或 skill 输出不符合 schema，任务会按指数退避最多重试 3 次，错误与 attempt 都写入 task events。用户离线超过 10 分钟后 supervisor 会停止 gateway；只要仍有 queued/running 的聊天、切题、知识库、笔记、批改、高亮或闪卡任务，supervisor 就会启动并保活对应容器。
 
+交互聊天使用两种明确的镜像范围：请求或历史消息含附件时，只镜像这些显式引用的附件；没有附件的普通聊天会镜像该 personal workspace 的全部 `uploaded/ready` 文档和可用 artifact，并在 `openclaw_prepare.data.mirror_scope` 中分别标识为 `attachments` 或 `workspace`。因此普通聊天的 task-local `documents/index.json` 不会因空附件集合而变成空索引。客户端可用 `input.use_knowledge_base=false` 显式关闭本次知识库检索，但这不会改变附件镜像的权限范围。
+
 生产环境只提供 Gateway runner。单元测试通过依赖注入使用 `tests/fakes.py`，不会在生产代码中生成替代结果。
 
 ## DocTr Image Preprocessing
@@ -598,9 +651,11 @@ DOCTR_ENABLED=false
 
 - `default` queue 使用 Redis key `notepatch:tasks`，普通 `worker` 默认只消费它。
 - `ocr` queue 使用 Redis key `notepatch:tasks:ocr`，GPU `ocr-worker` 只消费它。
-- `chat` queue 使用 Redis key `notepatch:tasks:chat`，常驻 `chat-worker` 消费所有 OpenClaw-backed 任务，避免扫描、purge 等 default 任务被长时间 AI 调用阻塞。
+- `chat` queue 使用 Redis key `notepatch:tasks:chat`，常驻 `chat-worker` 只消费交互式 `openclaw_agent_run`，避免被长时间学习任务阻塞。
+- `ai` queue 使用 Redis key `notepatch:tasks:ai`，常驻 `ai-worker` 消费题目提取、知识库、笔记、批改、高亮和闪卡任务。
 - `ocr_document` 和 `document_processing_pipeline` 都进入 `ocr` queue，普通 worker 不会加载 PaddleOCR；同一 OCR worker 进程会复用已加载模型。
-- `openclaw_agent_run`、`extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 都进入 `chat` queue。
+- `openclaw_agent_run` 进入低延迟 `chat` queue。
+- `extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 进入后台 `ai` queue。
 - `scan_document`、purge、merge 等非模型编排任务继续进入 `default` queue。
 - 可恢复错误进入 Redis delayed-retry zset，按指数退避重新投递；不会阻塞 worker loop。
 
@@ -610,6 +665,7 @@ worker 可用 CLI 或 env 指定队列：
 python -m notepatch.entrypoints.worker --queues default
 python -m notepatch.entrypoints.worker --queues ocr
 python -m notepatch.entrypoints.worker --queues chat
+python -m notepatch.entrypoints.worker --queues ai
 WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 ```
 
@@ -622,10 +678,10 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 1. 用户上传课件、笔记、试卷或作业，文件内容进入 SeaweedFS，数据库只保存 metadata。
 2. 上传完成后进入 GPU OCR queue：图片先尝试 DocTr，PDF 渲染后由 PP-StructureV3 执行文字、版面、表格和公式识别，输出六类 OCR artifacts。
 3. `courseware/note/other` 经 `notepatch_kb_builder` 独立更新知识库；同一学习单元最后一次知识更新 5 分钟后，才开始执行 HTML 学霸笔记，笔记成功后再生成持久化闪卡。
-4. `homework/corrected_homework/exam` 先经 `notepatch_question_extractor` 生成真实题目。作业随后执行 grading skill。
+4. `homework/corrected_homework/exam` 先经 `notepatch_question_extractor` 生成真实题目；只有 `homework/corrected_homework` 自动创建 Homework 并执行 grading skill，`exam` 只切题。
 5. `answer_key/rubric` 只完成 OCR，作为 Homework references 的评分依据，不自动生成普通笔记。
 6. 有答案或 rubric 时为 `official` 评分；没有依据时必须为 `provisional` 诊断性评分并带置信度。
-7. 错题会写入 mistakes 和带 BGE-M3 embedding 的知识块，再由 `notepatch_note_highlighter` 更新电子笔记。
+7. 错题会写入 mistakes 和带 BGE-M3 embedding 的知识块；学习单元已有笔记时才由 `notepatch_note_highlighter` 更新最新电子笔记，否则明确跳过高亮。
 
 学习单元优先使用有效的 `learning_unit_id`；未指定时每个文件创建一个独立学习单元，不再落入共享的“未归类学习单元”。当前是个人 workspace-only，所有 learning tables 都带 `workspace_id`。
 
@@ -712,6 +768,18 @@ docker compose exec ocr-worker python /opt/notepatch/scripts/ocr_smoke_test.py /
 
 `ocr-worker` 使用 `paddleocr-cache:/models/paddlex` 持久化模型；`embedding-service` 使用 `bge-cache`。DocTr、PaddleOCR 和 BGE-M3 通过 Redis GPU lease 全局串行，lease 带 token、TTL 和自动续租。`OCR_WORKER_CONCURRENCY=1`，单卡部署不要横向扩容 GPU worker。
 
+宿主 NVIDIA 驱动更新、重载或 GPU reset 后，长期运行的 GPU 容器可能保留失效的 NVML 注入，表现为 `Paddle CUDA runtime is unavailable: No CUDA device is visible` 或 `Failed to initialize NVML`。先确认没有 queued/running 的 GPU/AI task，再重新创建容器；单纯 `restart` 不足以刷新 NVIDIA runtime：
+
+```bash
+nvidia-smi
+docker compose up -d --force-recreate --no-deps docserver embedding-service
+docker compose --profile ocr up -d --force-recreate --no-deps ocr-worker
+docker exec notepatch-server-ocr-worker-1 \
+  python -c 'import paddle; print(paddle.device.cuda.device_count(), paddle.device.get_device())'
+```
+
+预期输出包含 `1 gpu:0`，且 `docker compose ps` 中三个 GPU 服务均为 healthy。模型权重和缓存位于持久 volume/bind mount，重建容器不会删除它们。
+
 DOCX/PPTX 先由内网 LibreOffice converter 转为 `converted_pdf` artifact，再复用 PDF OCR；转换失败会明确写入 task/events。
 
 知识检索与评分依据接口：
@@ -760,18 +828,15 @@ python3 -m venv .venv
 pip install -r requirements.txt
 pytest
 ```
-# NotePatch-Server
+## Upload validation and optional security scanning
 
+File security scanning is disabled by default so completed uploads can be displayed and processed immediately:
 
-## Production hardening
-
-The upload path is fail-closed in production:
-
-1. tusd accepts at most `UPLOAD_MAX_FILE_SIZE_MB` (200 MB by default).
-2. `scan_document` computes SHA-256, detects MIME with libmagic, and scans the object with ClamAV.
-3. MIME spoofing, malware, scanner unavailability, or oversize input fails the document and removes the untrusted object.
-4. Clean DOCX/PPTX files are converted by the internal LibreOffice service to a `converted_pdf` artifact before OCR.
-5. Images and PDFs continue through OCR, knowledge, HTML notes, flashcards, and OpenClaw tasks.
+1. tusd still accepts at most `UPLOAD_MAX_FILE_SIZE_MB` (200 MB by default), and object keys remain server-generated.
+2. With `CLAMAV_ENABLED=false`, upload completion sets `scan_status=skipped` and does not create a `scan_document` task. Learning files enter the automatic pipeline immediately; chat attachments become `ready`.
+3. Disabled scanning does not compute SHA-256 or inspect the actual MIME type with libmagic. The declared MIME allowlist and upload size limit still apply.
+4. Optional ClamAV scanning can be restored with the `security` Compose profile. In that mode MIME spoofing, malware, scanner unavailability, or oversize input fails the document and removes the untrusted object.
+5. DOCX/PPTX files are converted by the internal LibreOffice service to a `converted_pdf` artifact before OCR. Images, PDFs and converted files continue according to `document_kind`: courseware/note build knowledge and HTML notes; homework types extract and grade; answer/rubric stop after OCR until referenced.
 
 A document without a valid `learning_unit_id` creates its own learning unit. Merge units asynchronously:
 
@@ -802,8 +867,11 @@ Validate and migrate before replacing containers:
 ```bash
 docker compose config --quiet
 docker compose run --rm api alembic upgrade head
-docker compose up -d --build api worker chat-worker converter clamav admin-web
+docker compose up -d --build api worker chat-worker ai-worker converter admin-web
 docker compose --profile ocr up -d --build ocr-worker
+
+# Optional: enable antivirus scanning explicitly.
+CLAMAV_ENABLED=true docker compose --profile security up -d --build clamav api worker
 ```
 
 Start backups and monitoring after setting non-default `RESTIC_PASSWORD` and `GRAFANA_ADMIN_PASSWORD`:
@@ -817,4 +885,53 @@ docker compose --profile ops run --rm backup sh /opt/notepatch/scripts/backup/ch
 
 Backups contain a PostgreSQL custom dump, a logical SeaweedFS S3 mirror, configuration manifest, and checksums under `${NOTEPATCH_DATA_ROOT}/backups`; Restic keeps 14 daily snapshots. Restore requires an explicit new target directory and never overwrites the running environment.
 
-Host exposure is limited to API `8001`, admin `5173`, tusd `1080`, signed S3 downloads `8333`, and optional Grafana `3000`. PostgreSQL, Redis, SeaweedFS master/filer, DocTr, embedding, converter, ClamAV, and Prometheus remain internal.
+Host exposure is limited to API `8001`, admin `5173`, tusd `1080`, signed S3 downloads `8333`, and optional Grafana `3000`. PostgreSQL, Redis, SeaweedFS master/filer, DocTr, embedding, converter, optional ClamAV, and Prometheus remain internal.
+
+## Random Public Gateway (FRP + IP TLS)
+
+Public access uses one deployment-only random prefix. The real value belongs in the untracked `.env` and `/etc/notepatch/public-gateway.env`; never commit it.
+
+```text
+https://PUBLIC_IP/np-<32-lowercase-hex>/                 Admin Web
+https://PUBLIC_IP/np-<32-lowercase-hex>/api/v1/          FastAPI
+https://PUBLIC_IP/np-<32-lowercase-hex>/files/           tusd
+https://PUBLIC_IP/np-<32-lowercase-hex>/health           health
+https://PUBLIC_IP/notepatch/...                          signed SeaweedFS objects
+```
+
+All other HTTPS paths return `404`. HTTP serves only `/.well-known/acme-challenge/`; after TLS activation, other HTTP requests redirect to the random-prefix homepage. The random path only reduces scanner noise and does not replace JWT, workspace checks, rate limits, or S3 signatures.
+
+This host terminates TLS in Nginx. A remote frps forwards TCP `80` and `443`; it must not terminate or rewrite HTTP. Bootstrap in this order:
+
+```bash
+# Local host: install the HTTP ACME site, Certbot and frpc. frpc remains stopped.
+sudo scripts/public-gateway/configure_nginx.sh http
+sudo scripts/public-gateway/install_certbot.sh
+sudo scripts/public-gateway/install_frpc.sh
+
+# Cloud host: install frps v0.71.0, copy infra/frp/frps.toml.example,
+# and securely copy /etc/frp/client_token to /etc/frp/server_token.
+# Open TCP 7000, 80 and 443, then start frps.
+
+# Local host after frps is reachable:
+sudo systemctl enable --now frpc
+sudo scripts/public-gateway/issue_ip_certificate.sh staging
+sudo scripts/public-gateway/issue_ip_certificate.sh production
+```
+
+The production certificate uses Certbot's `shortlived` profile and IP validation. `notepatch-cert-renew.timer` checks every eight hours. It skips certificates with more than three days remaining, force-renews certificates inside the three-day window, validates Nginx, and reloads it only after successful renewal. Failures are recorded in the systemd journal. Do not enable the TLS site before the certificate exists. Nginx preserves the original `/notepatch/...` URI and `Host` because both are part of S3 SigV4.
+
+`notepatch-frp-direct-route.service` installs an IPv4 policy rule with priority `80` for the frps address. It forces both the long-lived frpc control socket and later work sockets to use the main routing table instead of v2rayN/sing-box TUN tables. The frpc service also clears proxy environment variables. Install or refresh it with `sudo scripts/public-gateway/install_frp_direct_route.sh`; verify with `ip route get 8.137.78.255`, which must show the physical LAN interface rather than `singbox_tun`.
+
+For public activation, configure:
+
+```bash
+PUBLIC_PATH_PREFIX=/np-<32-lowercase-hex>
+PUBLIC_API_BASE_URL=https://PUBLIC_IP${PUBLIC_PATH_PREFIX}
+TUSD_BASE_URL=https://PUBLIC_IP${PUBLIC_PATH_PREFIX}/files/
+SEAWEEDFS_PUBLIC_BASE_URL=https://PUBLIC_IP
+VITE_API_BASE_URL=${PUBLIC_PATH_PREFIX}/api/v1
+VITE_TUSD_BASE_URL=https://PUBLIC_IP${PUBLIC_PATH_PREFIX}/files/
+```
+
+LAN/VPN ports `8001`, `5173`, `1080`, and `8333` remain published for existing clients. Public clients must use the prefixed URLs.

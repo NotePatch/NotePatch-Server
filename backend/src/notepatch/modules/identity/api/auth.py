@@ -48,7 +48,13 @@ def _is_expired(expires_at: datetime) -> bool:
     return expires_at <= utcnow()
 
 
-TERMINAL_REFRESH_REVOCATION_REASONS = {"logout", "password_change", "admin_action", "user_disabled"}
+TERMINAL_REFRESH_REVOCATION_REASONS = {
+    "logout",
+    "password_change",
+    "profile_email_change",
+    "admin_action",
+    "user_disabled",
+}
 
 
 def _issue_tokens(
@@ -59,7 +65,7 @@ def _issue_tokens(
     parent_token_id: str | None = None,
     commit: bool = True,
 ) -> TokenResponse:
-    access_token, access_expires_at = create_access_token(user.id)
+    access_token, access_expires_at = create_access_token(user.id, user.auth_version)
     refresh_token, refresh_expires_at = create_refresh_token(user.id)
     family_id = family_id or str(uuid.uuid4())
     db.add(
@@ -212,6 +218,7 @@ def change_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
     current_user.password_hash = hash_password(payload.new_password)
     current_user.must_change_password = False
+    current_user.auth_version += 1
     now = utcnow()
     for token in db.scalars(
         select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at.is_(None))

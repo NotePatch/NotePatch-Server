@@ -82,6 +82,8 @@ def _user_read(user: User) -> AdminUserRead:
         is_active=user.is_active,
         must_change_password=user.must_change_password,
         ai_history_enabled=user.ai_history_enabled,
+        avatar_url=user.avatar_url,
+        profile_version=user.profile_version,
         created_at=user.created_at,
     )
 
@@ -114,6 +116,9 @@ def _document_item(db: Session, document: Document) -> AdminDocumentListItem:
         file_size=document.file_size,
         file_type=document.file_type,
         document_kind=document.document_kind,
+        retention_scope=document.retention_scope,
+        chat_conversation_id=document.chat_conversation_id,
+        save_to_documents=document.save_to_documents,
         status=document.status,
         artifacts_count=artifacts_count,
         created_at=document.created_at,
@@ -293,6 +298,7 @@ def list_documents(
     status_filter: str | None = Query(default=None, alias="status"),
     file_type: str | None = None,
     document_kind: str | None = None,
+    retention_scope: str | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
     _admin: User = Depends(require_admin_user),
@@ -308,6 +314,8 @@ def list_documents(
         query = query.where(Document.file_type == file_type)
     if document_kind:
         query = query.where(Document.document_kind == document_kind)
+    if retention_scope:
+        query = query.where(Document.retention_scope == retention_scope)
     if user_id:
         query = query.where(Document.uploaded_by == user_id)
     if workspace_id:

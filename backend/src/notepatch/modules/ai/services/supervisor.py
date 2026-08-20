@@ -148,7 +148,6 @@ class OpenClawContainerManager:
         volumes = self.runtime.container_volumes(user_id)
         group_add = self.runtime.container_group_add()
         config_hash = self._runtime_config_hash(
-            user_id=user_id,
             image=image,
             network=network,
             command=command,
@@ -179,7 +178,6 @@ class OpenClawContainerManager:
     def _runtime_config_hash(
         self,
         *,
-        user_id: str,
         image: str,
         network: str,
         command: list[str],
@@ -187,14 +185,6 @@ class OpenClawContainerManager:
         volumes: dict[str, dict[str, str]],
         group_add: list[str],
     ) -> str:
-        openclaw_config: object = ""
-        config_path = self.runtime.openclaw_json_path(user_id)
-        if config_path.exists():
-            raw_config = config_path.read_text(encoding="utf-8")
-            try:
-                openclaw_config = self._deployment_openclaw_config(json.loads(raw_config))
-            except json.JSONDecodeError:
-                openclaw_config = raw_config
         payload = {
             "image": image,
             "network": network,
@@ -202,7 +192,6 @@ class OpenClawContainerManager:
             "environment": environment,
             "volumes": volumes,
             "group_add": group_add,
-            "openclaw_json": openclaw_config,
             "resources": {
                 "memory": self.settings.openclaw_gateway_memory_limit,
                 "nano_cpus": self.settings.openclaw_gateway_nano_cpus,
@@ -213,24 +202,6 @@ class OpenClawContainerManager:
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
-
-    @staticmethod
-    def _deployment_openclaw_config(config: object) -> object:
-        """Exclude fields OpenClaw itself writes during a normal gateway startup."""
-        if not isinstance(config, dict):
-            return config
-        normalized = json.loads(json.dumps(config))
-        normalized.pop("meta", None)
-        plugins = normalized.get("plugins")
-        if isinstance(plugins, dict):
-            entries = plugins.get("entries")
-            if isinstance(entries, dict) and entries.get("openai") == {"enabled": True}:
-                entries.pop("openai", None)
-            if isinstance(entries, dict) and not entries:
-                plugins.pop("entries", None)
-            if not plugins:
-                normalized.pop("plugins", None)
-        return normalized
 
     def _get_container(self, name: str):
         try:

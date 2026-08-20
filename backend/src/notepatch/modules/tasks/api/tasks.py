@@ -7,13 +7,17 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from notepatch.entrypoints.deps import get_workspace_member
+from notepatch.entrypoints.deps import get_current_user, get_task_service, get_workspace_member
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import get_db
 from notepatch.platform.metrics import SSE_CONNECTIONS
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.identity.models.workspace import WorkspaceMember
+from notepatch.modules.identity.models.user import User
+from notepatch.modules.ai.models.chat import ChatConversation
+from notepatch.modules.ai.services.chat import ChatService
 from notepatch.modules.tasks.schemas.task import TaskEventRead, TaskRead
+from notepatch.modules.tasks.services.task import TaskService
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/tasks", tags=["tasks"])
 
@@ -28,6 +32,41 @@ def get_task(
     task = db.scalar(select(Task).where(Task.workspace_id == workspace_id, Task.id == task_id))
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    return task
+
+
+@router.post("/{task_id}/cancel", response_model=TaskRead, status_code=status.HTTP_202_ACCEPTED)
+def cancel_chat_task(
+    workspace_id: str,
+    task_id: str,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    task_service: TaskService = Depends(get_task_service),
+) -> Task:
+    task = task_service.db.scalar(
+        select(Task)
+        .join(
+            ChatConversation,
+            (Task.resource_type == "chat_conversation") & (Task.resource_id == ChatConversation.id),
+        )
+        .where(
+            Task.workspace_id == workspace_id,
+            Task.id == task_id,
+            Task.task_type == "openclaw_agent_run",
+            ChatConversation.workspace_id == workspace_id,
+            ChatConversation.user_id == current_user.id,
+            ChatConversation.deleted_at.is_(None),
+        )
+    )
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat task not found")
+    if task.status in {"queued", "running"}:
+        task_service.request_cancel(task, "Cancelled by user")
+        task_service.db.refresh(task)
+    if task.status == "cancelled":
+        ChatService(task_service.db).mark_assistant_cancelled(task, "Cancelled by user")
+        task_service.db.commit()
+        task_service.db.refresh(task)
     return task
 
 

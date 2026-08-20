@@ -4,7 +4,9 @@ COPY web/admin/package*.json ./
 RUN npm ci
 COPY web/admin ./
 ARG VITE_API_BASE_URL=/api/v1
+ARG VITE_PUBLIC_PATH_PREFIX=/
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_PUBLIC_PATH_PREFIX=${VITE_PUBLIC_PATH_PREFIX}
 RUN npm run build
 
 FROM nginx:1.27-alpine

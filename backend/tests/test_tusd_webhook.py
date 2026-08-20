@@ -52,6 +52,7 @@ def test_tusd_finished_webhook_is_idempotent(client, db_sessionmaker, tmp_path: 
     )
     assert document.status_code == 200
     assert document.json()["status"] == "uploaded"
+    assert document.json()["scan_status"] == "skipped"
     assert document.json()["upload_id"] == tus_upload_id
 
     with db_sessionmaker() as db:
@@ -61,6 +62,16 @@ def test_tusd_finished_webhook_is_idempotent(client, db_sessionmaker, tmp_path: 
             .all()
         )
         assert len(artifacts) == 1
+        assert (
+            db.query(Task)
+            .filter_by(
+                workspace_id=workspace_id,
+                task_type="scan_document",
+                resource_id=document_id,
+            )
+            .count()
+            == 0
+        )
 
 
 def test_tusd_finish_and_client_completion_create_one_scan_task(
