@@ -10,6 +10,7 @@ NOTEPATCH_SKILLS = (
     "notepatch_question_extractor",
     "notepatch_kb_builder",
     "notepatch_scholar_notes",
+    "notepatch_note_supplement",
     "notepatch_grading",
     "notepatch_note_highlighter",
     "notepatch_flashcards",

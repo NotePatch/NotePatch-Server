@@ -143,6 +143,10 @@ class StorageService:
         response = self._client.get_object(Bucket=bucket or self.bucket, Key=object_key)
         return response["Body"].read().decode("utf-8")
 
+    def get_object_bytes(self, bucket: str, object_key: str) -> bytes:
+        response = self._client.get_object(Bucket=bucket, Key=object_key)
+        return response["Body"].read()
+
     def delete_prefix(self, prefix: str) -> None:
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):

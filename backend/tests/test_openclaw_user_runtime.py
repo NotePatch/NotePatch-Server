@@ -38,6 +38,7 @@ def test_register_generates_openclaw_user_runtime(client):
         "notepatch_grading",
         "notepatch_note_highlighter",
         "notepatch_flashcards",
+        "notepatch_note_supplement",
     }
     for skill in expected_skills:
         skill_path = root / "workspace" / "skills" / skill / "SKILL.md"

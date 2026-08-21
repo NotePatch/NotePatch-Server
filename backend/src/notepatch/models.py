@@ -30,6 +30,13 @@ from notepatch.modules.learning.models.learning import (
     StudyNoteVersion,
 )
 from notepatch.modules.learning.models.assignment import LearningUnitAssignment
+from notepatch.modules.learning.models.note_workflow import (
+    NoteGapSuggestion,
+    NoteSet,
+    NoteSetDocument,
+    NoteSupplementDraft,
+    StudyNoteCorrection,
+)
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.tasks.models.workflow import WorkflowEvent, WorkflowRun, WorkflowTaskLink
 
@@ -51,6 +58,11 @@ __all__ = [
     "LearningUnit",
     "LearningUnitAssignment",
     "LearningUnitDocument",
+    "NoteSet",
+    "NoteSetDocument",
+    "StudyNoteCorrection",
+    "NoteGapSuggestion",
+    "NoteSupplementDraft",
     "Mistake",
     "Permission",
     "Question",

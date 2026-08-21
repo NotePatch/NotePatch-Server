@@ -23,6 +23,9 @@ TASK_STAGE = {
     "generate_study_notes": ("study_notes", "enrichment"),
     "generate_flashcards": ("flashcards", "enrichment"),
     "highlight_study_notes": ("note_highlight", "enrichment"),
+    "detect_note_gaps": ("note_gap_detection", "enrichment"),
+    "generate_note_supplement": ("note_supplement", "enrichment"),
+    "purge_study_note_history": ("note_history_cleanup", "enrichment"),
     "merge_learning_units": ("learning_unit_merge", "core"),
 }
 

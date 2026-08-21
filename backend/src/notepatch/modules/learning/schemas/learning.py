@@ -70,6 +70,9 @@ class StudyNoteVersionRead(ORMModel):
     title: str
     html_object_key: str
     json_object_key: str
+    note_ir_object_key: str | None = None
+    content_edit_level: str = "conceptual"
+    layout_edit_level: str = "minor"
     highlighted_html_object_key: str | None = None
     highlight_map_object_key: str | None = None
     knowledge_point_ids: list = Field(default_factory=list)

@@ -14,7 +14,7 @@ from notepatch.modules.admin.api import admin, management
 from notepatch.modules.ai.api import ai
 from notepatch.modules.documents.api import artifacts, documents, webhooks
 from notepatch.modules.identity.api import auth, presence, profile, workspaces
-from notepatch.modules.learning.api import assets, homeworks, knowledge, learning, mistakes
+from notepatch.modules.learning.api import assets, homeworks, knowledge, learning, mistakes, note_gaps, note_sets
 from notepatch.modules.tasks.api import tasks, workflows
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import SessionLocal
@@ -64,6 +64,8 @@ for router in (
     assets.router,
     homeworks.router,
     learning.router,
+    note_sets.router,
+    note_gaps.router,
     knowledge.router,
     mistakes.router,
     ai.router,

@@ -275,7 +275,7 @@ USER_AVATAR_MAX_SIZE_MB=5
 USER_AVATAR_MAX_DIMENSION=4096
 ```
 
-部署该功能前必须执行 `alembic upgrade head`，使数据库达到当前 head revision `202608210001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
+部署该功能前必须执行 `alembic upgrade head`，使数据库达到当前 head revision `202608220001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
 
 这些新接口返回统一 envelope：`{"code":"ok","message":"...","data":{...}}`。现有 task、document 和 chat 创建接口保持原响应结构。
 
@@ -662,8 +662,8 @@ DOCTR_ENABLED=false
 - `ai` queue 使用 Redis key `notepatch:tasks:ai`，常驻 `ai-worker` 消费题目提取、知识库、笔记、批改、高亮和闪卡任务。
 - `ocr_document` 和 `document_processing_pipeline` 都进入 `ocr` queue，普通 worker 不会加载 PaddleOCR；同一 OCR worker 进程会复用已加载模型。
 - `openclaw_agent_run` 进入低延迟 `chat` queue。
-- `extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_flashcards`、`highlight_study_notes` 进入后台 `ai` queue。
-- `scan_document`、purge、merge 等非模型编排任务继续进入 `default` queue。
+- `extract_questions`、`grade_homework`、`build_knowledge_base`、`generate_study_notes`、`generate_note_supplement`、`generate_flashcards`、`highlight_study_notes` 进入后台 `ai` queue。
+- `scan_document`、`detect_note_gaps`、`purge_study_note_history`、其他 purge 和 merge 等非模型编排任务进入 `default` queue。
 - 可恢复错误进入 Redis delayed-retry zset，按指数退避重新投递；不会阻塞 worker loop。
 
 worker 可用 CLI 或 env 指定队列：
@@ -680,68 +680,100 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 
 ## Automatic Learning Workflow
 
-`AUTO_LEARNING_PIPELINE=true` 时，上传完成后会自动创建 `document_processing_pipeline` task。整个流程继续使用现有 worker/Task/Event 架构：
+`AUTO_LEARNING_PIPELINE=true` 时，上传完成后会创建现有 `document_processing_pipeline` task。资料按类型分流：
 
-1. 用户上传课件、笔记、试卷或作业，文件内容进入 SeaweedFS，数据库只保存 metadata。
-2. 上传完成后进入 GPU OCR queue：图片先尝试 DocTr，PDF 渲染后由 PP-StructureV3 执行文字、版面、表格和公式识别，输出六类 OCR artifacts。
-3. `courseware/note/other` 经 `notepatch_kb_builder` 独立更新知识库；同一学习单元最后一次知识更新 5 分钟后，才开始执行 HTML 学霸笔记，笔记成功后再生成持久化闪卡。
-4. `homework/corrected_homework/exam` 先经 `notepatch_question_extractor` 生成真实题目；只有 `homework/corrected_homework` 自动创建 Homework 并执行 grading skill，`exam` 只切题。
-5. `answer_key/rubric` 只完成 OCR，作为 Homework references 的评分依据，不自动生成普通笔记。
-6. 有答案或 rubric 时为 `official` 评分；没有依据时必须为 `provisional` 诊断性评分并带置信度。
-7. 错题会写入 mistakes 和带 BGE-M3 embedding 的知识块；学习单元已有笔记时才由 `notepatch_note_highlighter` 更新最新电子笔记，否则明确跳过高亮。
+1. `note`：OCR → 知识库 → 5 分钟防抖 → 忠实电子笔记 → 加权闪卡；有错题时更新最新高亮。
+2. `courseware/other`：OCR → 知识库 → `detect_note_gaps`，不会自动生成或改写笔记。
+3. `homework/corrected_homework`：OCR → 题目提取 → 评分 → 答题记录/错题 → 缺口检测；已有笔记时才高亮和重建闪卡。
+4. `exam`：OCR、题目提取和缺口检测，不自动创建普通 Homework。
+5. `answer_key/rubric`：OCR 后作为评分依据，不生成笔记。
 
-评分成功后，Homework 列表和详情的 `latest_grading_result` 直接提供最新 `score/max_score/grading_mode/confidence`；完整历史通过 `GET /api/v1/workspaces/{workspace_id}/homeworks/{homework_id}/grading-results` 查询。未完成 tus 上传的文档仍是 `uploading`，不会创建 Homework 或触发评分。
+有答案或 rubric 时评分为 `official`；没有依据时只能产生带置信度的 `provisional` 诊断结果。学习单元优先使用显式 `learning_unit_id`；未指定时先精确匹配，再在 OCR 后用 BGE-M3 高置信归组，低置信则新建单元。
 
-学习单元优先使用显式 `learning_unit_id`。未指定时，后端先按规范化标题、学科、年级和主题做唯一精确匹配；仍未匹配的资料会在 OCR 后进入 `assign_learning_unit`，使用 BGE-M3 比较当前 workspace 的知识块。最高分至少 `0.90` 且领先第二候选至少 `0.05` 时自动归入已有单元，否则为该文件创建新单元。Embedding 暂时不可用只会产生 warning 并创建新单元，不阻断核心流程。当前是 personal workspace-only，所有学习与工作流查询都必须带 `workspace_id`。
-
-上传响应包含 `workflow_run_id`，Document 包含 `latest_workflow_run_id`。客户端应优先跟踪聚合工作流，而不是自行拼接多个 task：
+上传响应包含 `workflow_run_id`，Document 包含 `latest_workflow_run_id`。客户端应优先跟踪聚合工作流：
 
 ```http
-GET /api/v1/workspaces/{workspace_id}/workflows?page=1&page_size=50
+GET /api/v1/workspaces/{workspace_id}/workflows
 GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}
 GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events
 GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events/stream
 GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/workflow
 ```
 
-工作流将上传、OCR、归组、知识库/题目提取/评分视为 `core_status`，将延迟笔记、闪卡和高亮视为 `enrichment_status`。核心结果已可用但增强失败时总状态为 `partially_succeeded`；笔记处于防抖或延迟重试时为 `waiting`，并提供 `waiting_until`。SSE 使用 `WorkflowEvent.sequence_no` 作为 `Last-Event-ID`，终态发送 `done` 后关闭。
+### Faithful Note Policies
 
-查询结果：
+用户默认值通过 `PATCH /api/v1/auth/preferences` 设置：
+
+```json
+{"note_content_edit_level":"conceptual","note_layout_edit_level":"minor","note_history_limit":3}
+```
+
+内容等级为 `verbatim/spelling/conceptual/rewrite`，排版等级为 `preserve/minor/reorder/reflow`，默认 `conceptual + minor`。上传 note 可用同名字段单次覆盖；也可手动触发：
 
 ```http
-GET /workspaces/{workspace_id}/learning-units
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/knowledge-chunks
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes?include_download_url=true
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=html
-POST /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{latest_note_version_id}/revisions
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/latest
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/{deck_id}
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/generate
+
+{"content_edit_level":"spelling","layout_edit_level":"preserve","force_reprocess":false}
 ```
 
-5 分钟是知识更新防抖窗口，不是笔记完成时限。到期后 `generate_study_notes` 还需要调用用户 OpenClaw gateway、校验结构化输出、清洗 HTML 并写入 SeaweedFS；可恢复错误最多重试 3 次，因此实际完成时间可能超过 5 分钟。客户端应按以下字段判断：
+策略在 task 创建时固化。Scholar Notes 只输出带来源映射的 Note IR；后端校验每个 OCR block、代码缩进、公式、表格、箭头/圈选关系和纠错证据，再确定性渲染 HTML。非 `rewrite` 模式不得漏掉或重复原始 block；`conceptual` 修正必须有高置信来源。低置信图示可保存版本专属原图裁剪，并仅通过签名 `rendered_html` 展示。
 
-- `knowledge_revision > notes_generated_revision`：最新知识尚未生成笔记，应继续轮询。
-- `note_generation_due_at != null`：笔记已安排或仍在生成，不应显示为永久无笔记。
-- `knowledge_revision == notes_generated_revision` 且 notes 列表存在最新版本：本轮生成完成。
+`note_history_limit` 表示最新版本之外保留的历史版本数，范围 `0..100`。正文变化创建新版本；超限版本、专属对象和对应卡组异步清理，但不删除最新版本、原始资料或答题审计。
 
-建议每 5-10 秒刷新 learning unit 和 notes，不要在防抖时间刚结束时停止等待。长时间未追平时，通过管理后台 task/events 检查 `generate_study_notes` 的 attempt 和错误；gateway 返回成功但未创建 `study_note.json` 时，worker 会记录错误并自动重试。
+### Continuous Image Notes
 
-笔记是经过后端白名单清洗的 HTML fragment，禁止 script、iframe、事件属性、任意 style 和外部资源。修订请求使用 `{ "html": "<article>...</article>", "title": "...", "edit_summary": "..." }`。手动编辑总是创建递增版本；AI 高亮只更新最新版本关联的 `highlighted_html` artifact，不创建版本。管理后台使用富文本编辑器，Android 应使用受控 HTML 渲染。
+连续多图先创建 NoteSet：
 
-图片类 note 生成学霸笔记时，OCR 与知识库仍是文字事实的权威来源，原图只作为排版参考。后端从当前学习单元选择最新 8 张可用图片笔记，按时间顺序发送给支持多模态的用户所选模型；模型参考章节顺序、分组、分栏、表格和强调密度，并可修正歪斜、间距与可读性。JPEG/PNG/WebP 在网关限制内直接使用，TIFF 或超限图片只在 task-local 目录生成临时 JPEG 预览，不新增业务 artifact。若 provider 明确拒绝图片输入，任务会记录 study_note_visual_fallback 并自动用 OCR-only 完成；鉴权、网络和服务端错误不会被当作能力降级。新生成笔记使用 notepatch-paper-v2，历史笔记继续使用 v1；客户端始终按 rendering.theme_id/css_url 或 download_urls.rendered_html 展示。视觉来源和实际模式保存在笔记 metadata，任务事件还会出现 study_note_visual_references_selected 与 study_note_visual_applied。
+```http
+POST /api/v1/workspaces/{workspace_id}/note-sets
 
-知识点答题历史同时记录正确、部分正确和错误。闪卡优先级由后端确定性计算：错误次数与近期错误提高权重，时间会衰减，近期连续答对通过 success pressure 和 streak multiplier 降低旧错题权重。OpenClaw 只生成卡片文本；卡组、卡片、权重和权重因子持久化在 PostgreSQL。
+{"title":"操作系统第 3 讲","expected_page_count":3,"subject":"computer science"}
+```
 
-首次升级到 HTML 笔记前先 dry-run，再执行清理和自动重建：
+每页 upload session 提交相同 `note_set_id` 和唯一、从 0 开始的 `page_index`，且 `document_kind` 必须为 `note`。上传全部页面后调用：
+
+```http
+GET  /api/v1/workspaces/{workspace_id}/note-sets/{note_set_id}
+POST /api/v1/workspaces/{workspace_id}/note-sets/{note_set_id}/complete
+```
+
+每页独立 OCR 和重试，但组内资料固定属于同一 LearningUnit；全部知识库完成后按 `page_index` 合并且只生成一份笔记。没有 NoteSet 时继续使用高置信自动归组，低置信资料不会被强行拼接。
+
+### Knowledge Gaps
+
+课件、作业和考试只提出缺口，不直接修改笔记：
+
+```http
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft
+PATCH /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft/regenerate
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/accept
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/reject
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/from-gaps
+```
+
+建议返回 `document_id/page_index/block_id/bbox/excerpt` 来源和 `section_id/insert_position/target_anchor` 位置，可跳转到 `rendered_html#target_anchor`。接受时必须仍基于最新笔记，否则返回 `409`。没有基础笔记时状态为 `no_base_note`，必须显式通过 `notes/from-gaps` 创建首版。来源删除或笔记变化后建议变为 `stale`。
+
+### Note Results
+
+```http
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes?include_download_url=true
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{note_version_id}/download-url?kind=rendered_html
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{note_version_id}/corrections
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{latest_note_version_id}/revisions
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/latest
+```
+
+5 分钟只是 note 知识更新后的防抖窗口。客户端优先展示 `download_urls.rendered_html`，按后端主题渲染；手工修订创建新版本，错题高亮只更新最新版本。图片 note 的 OCR 是文字基线，原图同时用于转录、代码/标记关系和排版参考；不支持视觉的模型仅降级为 OCR-only。
+
+历史数据校正脚本默认 dry-run：
 
 ```bash
-docker compose exec api python /opt/notepatch/scripts/reset_study_notes_to_html.py
-docker compose exec api python /opt/notepatch/scripts/reset_study_notes_to_html.py --apply
+docker compose exec api python /opt/notepatch/scripts/reconcile_faithful_notes.py
+docker compose exec api python /opt/notepatch/scripts/reconcile_faithful_notes.py --workspace-id <workspace-id> --apply
 ```
-
-该脚本永久删除旧 Markdown 笔记、高亮和闪卡输出，但保留原始文档、OCR 与仍存在的有效知识块，并安排 5 分钟后的 HTML 笔记生成。若某学习单元的历史知识块此前已经被清理，脚本不会凭空重建笔记；需要重新处理对应课件/笔记，使 `build_knowledge_base` 先恢复知识块。
 
 历史自动创建的碎片单元可先 dry-run，再按高置信结果创建现有异步 merge task：
 
@@ -868,7 +900,7 @@ File security scanning is disabled by default so completed uploads can be displa
 2. With `CLAMAV_ENABLED=false`, upload completion sets `scan_status=skipped` and does not create a `scan_document` task. Learning files enter the automatic pipeline immediately; chat attachments become `ready`.
 3. Disabled scanning does not compute SHA-256 or inspect the actual MIME type with libmagic. The declared MIME allowlist and upload size limit still apply.
 4. Optional ClamAV scanning can be restored with the `security` Compose profile. In that mode MIME spoofing, malware, scanner unavailability, or oversize input fails the document and removes the untrusted object.
-5. DOCX/PPTX files are converted by the internal LibreOffice service to a `converted_pdf` artifact before OCR. Images, PDFs and converted files continue according to `document_kind`: courseware/note build knowledge and HTML notes; homework types extract and grade; answer/rubric stop after OCR until referenced.
+5. DOCX/PPTX files are converted by the internal LibreOffice service to a `converted_pdf` artifact before OCR. Images, PDFs and converted files continue according to `document_kind`: note builds knowledge and a faithful HTML note; courseware/other build knowledge and note-gap suggestions; homework types extract, grade and detect gaps; answer/rubric stop after OCR until referenced.
 
 A document without a valid `learning_unit_id` creates its own learning unit. Merge units asynchronously:
 

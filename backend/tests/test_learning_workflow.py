@@ -101,8 +101,8 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
             fake_storage,
             user["access_token"],
             workspace_id,
-            filename="algebra-courseware.png",
-            document_kind="courseware",
+            filename="algebra-notes.png",
+            document_kind="note",
             metadata={"subject": "math", "grade_level": "g8", "topic": "Quadratic Equations"},
         )
         document_id = upload["document"]["id"]
@@ -192,7 +192,7 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
 
         units = client.get(f"/api/v1/workspaces/{workspace_id}/learning-units", headers=auth_headers(user["access_token"]))
         assert units.status_code == 200, units.text
-        assert units.json()[0]["title"] == "algebra-courseware.png"
+        assert units.json()[0]["title"] == "algebra-notes.png"
 
         notes = client.get(
             f"/api/v1/workspaces/{workspace_id}/learning-units/{learning_unit.id}/notes?include_download_url=true",
@@ -266,8 +266,8 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
             fake_storage,
             user["access_token"],
             workspace_id,
-            filename="lesson.png",
-            document_kind="courseware",
+            filename="lesson-notes.png",
+            document_kind="note",
             metadata={"learning_unit_title": "Linear Functions", "subject": "math"},
         )
 

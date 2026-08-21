@@ -235,7 +235,11 @@ def update_preferences(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> User:
-    current_user.ai_history_enabled = payload.ai_history_enabled
+    updates = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one preference is required")
+    for field, value in updates.items():
+        setattr(current_user, field, value)
     db.commit()
     db.refresh(current_user)
     return current_user

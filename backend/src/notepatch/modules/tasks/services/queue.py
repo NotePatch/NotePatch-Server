@@ -11,6 +11,7 @@ OPENCLAW_BACKED_TASK_TYPES = {
     "generate_flashcards",
     "grade_homework",
     "highlight_study_notes",
+    "generate_note_supplement",
 }
 
 OPENCLAW_LEARNING_TASK_TYPES = OPENCLAW_BACKED_TASK_TYPES - {"openclaw_agent_run"}

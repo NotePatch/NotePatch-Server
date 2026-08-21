@@ -73,6 +73,7 @@ def test_note_revision_creates_version_and_downstream_tasks(client, db_sessionma
     assert {item["task_type"] for item in payload["downstream_tasks"]} == {
         "generate_flashcards",
         "highlight_study_notes",
+        "purge_study_note_history",
     }
 
     stale = client.post(

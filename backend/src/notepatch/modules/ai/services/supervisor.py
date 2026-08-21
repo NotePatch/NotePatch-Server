@@ -34,6 +34,7 @@ OPENCLAW_TASK_TYPES = {
     "generate_flashcards",
     "grade_homework",
     "highlight_study_notes",
+    "generate_note_supplement",
 }
 
 

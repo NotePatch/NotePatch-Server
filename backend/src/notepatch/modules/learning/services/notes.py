@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.learning.models.homework import Mistake
 from notepatch.modules.learning.models.learning import LearningUnit, StudyNoteVersion
+from notepatch.modules.learning.models.note_workflow import StudyNoteCorrection
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.storage import StorageService
@@ -33,6 +34,8 @@ class StudyNoteService:
         title: str | None,
         edit_summary: str | None,
         edit_origin: str = "user",
+        knowledge_point_ids: list[str] | None = None,
+        source_document_ids: list[str] | None = None,
     ) -> tuple[StudyNoteVersion, list[Task]]:
         unit = self.db.scalar(
             select(LearningUnit)
@@ -54,13 +57,20 @@ class StudyNoteService:
 
         try:
             clean_html = sanitize_note_html(html)
-            validate_knowledge_point_references(clean_html, set(latest.knowledge_point_ids or []))
+            effective_point_ids = list(
+                dict.fromkeys(knowledge_point_ids if knowledge_point_ids is not None else latest.knowledge_point_ids or [])
+            )
+            validate_knowledge_point_references(clean_html, set(effective_point_ids))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
         structured = self._download_json(latest.json_object_key)
         structured["title"] = title.strip() if isinstance(title, str) and title.strip() else latest.title
         structured["html"] = clean_html
-        structured["source_document_ids"] = list(latest.source_document_ids or [])
+        effective_source_ids = list(
+            dict.fromkeys(source_document_ids if source_document_ids is not None else latest.source_document_ids or [])
+        )
+        structured["source_document_ids"] = effective_source_ids
+        structured["knowledge_point_ids"] = effective_point_ids
         structured["revision"] = {
             "source_version_id": latest.id,
             "edited_by_user_id": actor.id,
@@ -75,12 +85,50 @@ class StudyNoteService:
         json_key = StorageService.learning_unit_note_key(
             workspace_id, learning_unit_id, version_id, "study_note", "json"
         )
+        ir_key = (
+            StorageService.learning_unit_note_key(
+                workspace_id, learning_unit_id, version_id, "note_ir", "json"
+            )
+            if latest.note_ir_object_key else None
+        )
         uploaded: list[str] = []
         try:
             self._put_text(html_key, clean_html)
             uploaded.append(html_key)
             self.storage.put_json_artifact(json_key, structured, bucket=self.storage.bucket)
             uploaded.append(json_key)
+            if ir_key:
+                self.storage.copy_object(
+                    self.storage.bucket,
+                    latest.note_ir_object_key,
+                    self.storage.bucket,
+                    ir_key,
+                )
+                uploaded.append(ir_key)
+            note_metadata = {**(latest.metadata_ or {}), "manual_revision": True}
+            copied_assets = {}
+            for index, (asset_id, asset) in enumerate(
+                ((latest.metadata_ or {}).get("visual_assets") or {}).items()
+            ):
+                source_key = asset.get("object_key") if isinstance(asset, dict) else None
+                if not source_key:
+                    continue
+                target_key = StorageService.learning_unit_note_key(
+                    workspace_id,
+                    learning_unit_id,
+                    version_id,
+                    f"source-fragment-revision-{index}",
+                    "png",
+                )
+                self.storage.copy_object(
+                    self.storage.bucket,
+                    source_key,
+                    self.storage.bucket,
+                    target_key,
+                )
+                uploaded.append(target_key)
+                copied_assets[asset_id] = {**asset, "object_key": target_key}
+            note_metadata["visual_assets"] = copied_assets
             note = StudyNoteVersion(
                 id=version_id,
                 workspace_id=workspace_id,
@@ -89,16 +137,41 @@ class StudyNoteService:
                 title=structured["title"],
                 html_object_key=html_key,
                 json_object_key=json_key,
-                knowledge_point_ids=list(latest.knowledge_point_ids or []),
-                source_document_ids=list(latest.source_document_ids or []),
+                note_ir_object_key=ir_key,
+                content_edit_level=latest.content_edit_level,
+                layout_edit_level=latest.layout_edit_level,
+                knowledge_point_ids=effective_point_ids,
+                source_document_ids=effective_source_ids,
                 source_mistake_ids=list(latest.source_mistake_ids or []),
                 source_version_id=latest.id,
                 edited_by_user_id=actor.id,
                 edit_origin=edit_origin,
                 edit_summary=edit_summary,
-                metadata_={**(latest.metadata_ or {}), "manual_revision": True},
+                metadata_=note_metadata,
             )
             self.db.add(note)
+            self.db.flush()
+            for correction in self.db.scalars(
+                select(StudyNoteCorrection).where(
+                    StudyNoteCorrection.workspace_id == workspace_id,
+                    StudyNoteCorrection.learning_unit_id == learning_unit_id,
+                    StudyNoteCorrection.note_version_id == latest.id,
+                )
+            ).all():
+                self.db.add(
+                    StudyNoteCorrection(
+                        workspace_id=workspace_id,
+                        learning_unit_id=learning_unit_id,
+                        note_version_id=note.id,
+                        source_block_id=correction.source_block_id,
+                        correction_type=correction.correction_type,
+                        original_text=correction.original_text,
+                        corrected_text=correction.corrected_text,
+                        reason=correction.reason,
+                        confidence=correction.confidence,
+                        source_refs=list(correction.source_refs or []),
+                    )
+                )
             self.db.commit()
             self.db.refresh(note)
         except Exception:
@@ -147,6 +220,18 @@ class StudyNoteService:
                     },
                 )
             )
+        tasks.append(
+            TaskService(self.db).create_task(
+                workspace_id=workspace_id,
+                task_type="purge_study_note_history",
+                resource_type="learning_unit",
+                resource_id=learning_unit_id,
+                payload={
+                    "learning_unit_id": learning_unit_id,
+                    "keep_history": actor.note_history_limit,
+                },
+            )
+        )
         return note, tasks
 
     def _download_json(self, object_key: str) -> dict:

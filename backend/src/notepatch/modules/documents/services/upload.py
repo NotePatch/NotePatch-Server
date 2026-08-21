@@ -16,6 +16,7 @@ from notepatch.modules.documents.models.document import (
 from notepatch.modules.documents.models.upload import UploadSession
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.learning.services.assignment import LearningUnitAssignmentService
+from notepatch.modules.learning.services.note_sets import NoteSetService
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.modules.tasks.services.workflow import WorkflowTracker
@@ -43,11 +44,20 @@ class UploadService:
         title: str | None,
         save_to_documents: bool = True,
         metadata: dict | None = None,
+        note_set_id: str | None = None,
+        page_index: int | None = None,
     ) -> tuple[Document, UploadSession, dict[str, str], str]:
         if file_size is not None and file_size > self.settings.upload_max_file_size_mb * 1024 * 1024:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"File exceeds the {self.settings.upload_max_file_size_mb} MB limit",
+            )
+        note_set = None
+        if note_set_id is not None:
+            if page_index is None:
+                raise HTTPException(status_code=422, detail="page_index is required with note_set_id")
+            note_set = NoteSetService(self.db).validate_upload(
+                workspace_id, note_set_id, page_index, document_kind
             )
         document_id = str(uuid.uuid4())
         safe_filename = sanitize_filename(filename)
@@ -72,6 +82,8 @@ class UploadService:
         )
         self.db.add(document)
         self.db.flush()
+        if note_set is not None:
+            NoteSetService(self.db).attach(note_set, document, page_index)
         if document.document_kind != CHAT_ATTACHMENT_KIND:
             LearningUnitAssignmentService(self.db, storage=self.storage).preassign(document)
         workflow = WorkflowTracker(self.db).create_for_document(

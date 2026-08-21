@@ -59,14 +59,16 @@ def test_public_path_prefix_validates_and_builds_note_urls():
 def test_deployment_schema_revision_matches_alembic_head():
     repo_root = Path(__file__).resolve().parents[2]
     expected = Settings(_env_file=None).schema_revision
-    assert expected == "202608210001"
+    assert expected == "202608220001"
     assert f"SCHEMA_REVISION: {expected}" in (repo_root / "compose.yml").read_text()
     for dockerfile in (
         repo_root / "infra/docker/backend.Dockerfile",
         repo_root / "infra/docker/ocr-worker.Dockerfile",
     ):
         assert f"ARG SCHEMA_REVISION={expected}" in dockerfile.read_text()
-    assert (repo_root / "backend/migrations/versions" / f"{expected}_workflow_and_unit_assignment.py").is_file()
+    revisions = list((repo_root / "backend/migrations/versions").glob(f"{expected}_*.py"))
+    assert len(revisions) == 1
+    assert f"revision: str = \"{expected}\"" in revisions[0].read_text()
 
 
 def test_public_gateway_preserves_external_tus_location():

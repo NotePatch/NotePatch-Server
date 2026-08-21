@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,11 +32,11 @@ from notepatch.modules.learning.schemas.skills import (
     ScholarNotesResult,
 )
 from notepatch.platform.storage import StorageService
-from notepatch.platform.config import get_settings
-from notepatch.platform.database import utcnow
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.modules.learning.services.content_operations import LearningContentOperations
 from notepatch.modules.learning.services.grading_operations import LearningGradingOperations
+from notepatch.modules.learning.services.note_gap_operations import NoteGapOperations
+from notepatch.modules.learning.services.note_scheduling import NoteSchedulingOperations
 
 
 DOCUMENT_ROLE_BY_KIND = {
@@ -51,7 +50,9 @@ DOCUMENT_ROLE_BY_KIND = {
 }
 
 
-class LearningWorkflowService(LearningContentOperations, LearningGradingOperations):
+class LearningWorkflowService(
+    LearningContentOperations, LearningGradingOperations, NoteGapOperations, NoteSchedulingOperations
+):
     def __init__(
         self,
         db: Session,
@@ -324,44 +325,6 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
                 )
             )
         return created
-
-    def schedule_study_notes(self, unit: LearningUnit, *, reason: str) -> Task:
-        settings = get_settings()
-        run_at = utcnow() + timedelta(seconds=settings.study_note_debounce_seconds)
-        service = TaskService(self.db)
-        queued = self.db.scalar(
-            select(Task)
-            .where(
-                Task.workspace_id == unit.workspace_id,
-                Task.task_type == "generate_study_notes",
-                Task.resource_type == "learning_unit",
-                Task.resource_id == unit.id,
-                Task.status == "queued",
-                Task.cancel_requested_at.is_(None),
-            )
-            .order_by(Task.created_at.desc())
-        )
-        payload = {
-            "learning_unit_id": unit.id,
-            "expected_knowledge_revision": unit.knowledge_revision,
-            "reason": reason,
-        }
-        unit.note_generation_due_at = run_at
-        if queued is not None:
-            queued.payload = payload
-            if not service.schedule_task_at(queued, run_at):
-                raise RuntimeError("Could not reschedule study note generation")
-            return queued
-        task = service.create_delayed_task(
-            workspace_id=unit.workspace_id,
-            task_type="generate_study_notes",
-            run_at=run_at,
-            resource_type="learning_unit",
-            resource_id=unit.id,
-            payload=payload,
-        )
-        self.db.refresh(unit)
-        return task
 
     def schedule_flashcards(self, unit: LearningUnit, note: StudyNoteVersion, *, reason: str) -> Task:
         existing, expected_attempt_revision = self._flashcard_task_for_revision(unit, note)

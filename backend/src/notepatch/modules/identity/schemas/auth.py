@@ -15,6 +15,9 @@ class UserRead(ORMModel):
     must_change_password: bool
     ai_history_enabled: bool
     preferred_ai_model: str | None = None
+    note_content_edit_level: str = "conceptual"
+    note_layout_edit_level: str = "minor"
+    note_history_limit: int = 3
     avatar_url: str | None = None
     profile_version: int = 1
     created_at: datetime
@@ -41,7 +44,14 @@ class LogoutRequest(BaseModel):
 
 
 class UserPreferencesUpdate(BaseModel):
-    ai_history_enabled: bool
+    ai_history_enabled: bool | None = None
+    note_content_edit_level: str | None = Field(
+        default=None, pattern=r"^(verbatim|spelling|conceptual|rewrite)$"
+    )
+    note_layout_edit_level: str | None = Field(
+        default=None, pattern=r"^(preserve|minor|reorder|reflow)$"
+    )
+    note_history_limit: int | None = Field(default=None, ge=0, le=100)
 
 
 class ChangePasswordRequest(BaseModel):

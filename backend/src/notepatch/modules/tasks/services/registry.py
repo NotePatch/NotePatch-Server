@@ -38,6 +38,9 @@ LEARNING_TASK_TYPES = {
     "generate_flashcards",
     "grade_homework",
     "highlight_study_notes",
+    "detect_note_gaps",
+    "generate_note_supplement",
+    "purge_study_note_history",
 }
 
 REGISTERED_TASK_TYPES = {

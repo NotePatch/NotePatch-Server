@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import tempfile
 import uuid
+from pathlib import Path
 
 from sqlalchemy import delete, func, select
+from PIL import Image
 
+from notepatch.modules.documents.models.document import DocumentArtifact
+from notepatch.modules.identity.models.user import User
+from notepatch.modules.identity.models.workspace import Workspace
 from notepatch.modules.learning.models.homework import Mistake, Question
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
@@ -13,6 +19,7 @@ from notepatch.modules.learning.models.learning import (
     LearningUnit,
     StudyNoteVersion,
 )
+from notepatch.modules.learning.models.note_workflow import NoteGapSuggestion, NoteSet, StudyNoteCorrection
 from notepatch.modules.learning.schemas.skills import (
     FlashcardsSkillResult,
     KnowledgeBuildResult,
@@ -20,6 +27,7 @@ from notepatch.modules.learning.schemas.skills import (
     ScholarNotesResult,
 )
 from notepatch.modules.tasks.models.task import Task
+from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.platform.storage import StorageService
 from notepatch.modules.learning.services.flashcard_priority import FlashcardPriorityService
@@ -31,6 +39,7 @@ from notepatch.modules.learning.services.html_notes import (
 )
 from notepatch.modules.learning.services.knowledge_points import KnowledgePointService
 from notepatch.modules.learning.services.note_themes import CURRENT_NOTE_THEME_ID
+from notepatch.modules.learning.services.note_ir import render_note_ir, validate_note_ir
 from notepatch.platform.config import get_settings
 
 
@@ -125,6 +134,140 @@ class LearningContentOperations:
         ]
         return eligible[-8:]
 
+    def _note_source_blocks(self, documents: list, storage: StorageService) -> list[dict]:
+        blocks: list[dict] = []
+        documents = sorted(
+            documents,
+            key=lambda item: (
+                0 if (item.metadata_ or {}).get("note_set_id") else 1,
+                str((item.metadata_ or {}).get("note_set_id") or ""),
+                int((item.metadata_ or {}).get("note_set_page_index", 0)),
+                item.created_at,
+            ),
+        )
+        for document in documents:
+            if document.document_kind != "note":
+                continue
+            artifact = self.db.scalar(
+                select(DocumentArtifact)
+                .where(
+                    DocumentArtifact.workspace_id == document.workspace_id,
+                    DocumentArtifact.document_id == document.id,
+                    DocumentArtifact.artifact_type == "ocr_json",
+                )
+                .order_by(DocumentArtifact.created_at.desc())
+            )
+            payload = None
+            if artifact is not None:
+                try:
+                    payload = storage.get_json_artifact(artifact.object_key, bucket=artifact.bucket)
+                except Exception:
+                    payload = None
+            for page in (payload or {}).get("pages", []):
+                for index, block in enumerate(page.get("blocks", [])):
+                    text = block.get("text") or block.get("latex") or block.get("markdown") or ""
+                    if not str(text).strip():
+                        continue
+                    raw_id = str(block.get("id") or f"block-{index}")
+                    blocks.append({
+                        "id": f"{document.id}:{raw_id}",
+                        "document_id": document.id,
+                        "page_index": int(page.get("page_index", 0)),
+                        "bbox": list(block.get("bbox") or [0, 0, 1, 1]),
+                        "reading_order": int(block.get("reading_order", index + 1)),
+                        "type": str(block.get("type") or "text"),
+                        "text": str(text),
+                        "confidence": float(block.get("confidence") or 0),
+                    })
+            if not any(item["document_id"] == document.id for item in blocks):
+                text = self._required_ocr_text(document)
+                blocks.append({
+                    "id": f"{document.id}:document-text",
+                    "document_id": document.id,
+                    "page_index": 0,
+                    "bbox": [0, 0, 1, 1],
+                    "reading_order": 1,
+                    "type": "text",
+                    "text": text,
+                    "confidence": 1.0,
+                })
+        return blocks
+
+    def _materialize_note_assets(
+        self,
+        *,
+        task: Task,
+        storage: StorageService,
+        result: ScholarNotesResult,
+        version_id: str,
+        documents: list,
+    ) -> dict[str, dict]:
+        document_by_id = {document.id: document for document in documents}
+        assets: dict[str, dict] = {}
+        candidates = [block for block in result.note_ir.blocks if block.preserve_as_image]
+        if not candidates:
+            return assets
+        with tempfile.TemporaryDirectory(prefix="notepatch-note-assets-") as directory:
+            root = Path(directory)
+            downloaded: dict[str, Path] = {}
+            for index, block in enumerate(candidates):
+                document = document_by_id.get(block.source_document_id)
+                if document is None or document.file_type != "image" or not document.object_key:
+                    continue
+                try:
+                    source_path = downloaded.get(document.id)
+                    if source_path is None:
+                        source_path = root / f"source-{len(downloaded)}"
+                        storage.download_file(document.bucket, document.object_key, source_path)
+                        downloaded[document.id] = source_path
+                    with Image.open(source_path) as source:
+                        source.load()
+                        x1, y1, x2, y2 = [int(round(value)) for value in block.bbox]
+                        x1 = max(0, min(source.width - 1, x1))
+                        y1 = max(0, min(source.height - 1, y1))
+                        x2 = max(x1 + 1, min(source.width, x2))
+                        y2 = max(y1 + 1, min(source.height, y2))
+                        crop = source.crop((x1, y1, x2, y2)).convert("RGB")
+                        output_path = root / f"asset-{index}.png"
+                        crop.save(output_path, format="PNG", optimize=True)
+                    object_key = StorageService.learning_unit_note_key(
+                        task.workspace_id,
+                        task.resource_id,
+                        version_id,
+                        f"source-fragment-{index}",
+                        "png",
+                    )
+                    storage.put_file(
+                        storage.bucket,
+                        object_key,
+                        output_path,
+                        content_type="image/png",
+                        metadata={"task_id": task.id, "source_document_id": document.id},
+                    )
+                    assets[block.id] = {
+                        "object_key": object_key,
+                        "mime_type": "image/png",
+                        "source_document_id": document.id,
+                        "page_index": block.page_index,
+                        "bbox": list(block.bbox),
+                    }
+                except Exception as exc:
+                    if StorageService.is_storage_error(exc):
+                        raise
+        return assets
+
+    def _note_policy(self, task: Task, unit: LearningUnit) -> tuple[str, str, int]:
+        workspace = self.db.scalar(select(Workspace).where(Workspace.id == unit.workspace_id))
+        owner = self.db.get(User, workspace.owner_user_id) if workspace is not None else None
+        content = str(task.payload.get("content_edit_level") or (owner.note_content_edit_level if owner else "conceptual"))
+        layout = str(task.payload.get("layout_edit_level") or (owner.note_layout_edit_level if owner else "minor"))
+        history_limit = int(task.payload.get("history_limit", owner.note_history_limit if owner else 3))
+        if content not in {"verbatim", "spelling", "conceptual", "rewrite"}:
+            raise PermanentTaskError("Invalid note content edit level")
+        if layout not in {"preserve", "minor", "reorder", "reflow"}:
+            raise PermanentTaskError("Invalid note layout edit level")
+        return content, layout, history_limit
+
     def build_knowledge_base(self, task: Task, storage: StorageService) -> dict:
         document = self._document(task.payload.get("document_id") or task.resource_id, task.workspace_id)
         learning_unit = self.ensure_learning_unit_for_document(document)
@@ -135,12 +278,17 @@ class LearningContentOperations:
             )
         ).all()
         if existing:
-            note_task = self.schedule_study_notes(learning_unit, reason="knowledge_reused")
+            downstream = self.schedule_after_knowledge(
+                document, learning_unit, reason="knowledge_reused"
+            )
             return {
                 "chunks_created": 0,
                 "chunk_ids": [chunk.id for chunk in existing],
                 "reused": True,
-                "downstream_tasks": [{"id": note_task.id, "task_type": note_task.task_type}],
+                "downstream_tasks": (
+                    [{"id": downstream.id, "task_type": downstream.task_type}]
+                    if downstream is not None else []
+                ),
             }
         source_text = self._required_ocr_text(document)
         result, run = self._skill().execute(
@@ -210,14 +358,19 @@ class LearningContentOperations:
         self._ensure_active(task)
         self.db.commit()
         self._ensure_active(task)
-        note_task = self.schedule_study_notes(learning_unit, reason="knowledge_updated")
+        downstream = self.schedule_after_knowledge(
+            document, learning_unit, reason="knowledge_updated"
+        )
         return {
             "chunks_created": len(chunk_ids),
             "chunk_ids": chunk_ids,
             "output_key": run["output_key"],
             "learning_unit_id": learning_unit.id,
             "knowledge_revision": learning_unit.knowledge_revision,
-            "downstream_tasks": [{"id": note_task.id, "task_type": note_task.task_type}],
+            "downstream_tasks": (
+                [{"id": downstream.id, "task_type": downstream.task_type}]
+                if downstream is not None else []
+            ),
         }
 
     def generate_study_notes(self, task: Task, storage: StorageService) -> dict:
@@ -227,7 +380,12 @@ class LearningContentOperations:
         unit = self._learning_unit(task.payload.get("learning_unit_id") or task.resource_id, task.workspace_id)
         expected_revision = int(task.payload.get("expected_knowledge_revision", unit.knowledge_revision))
         if expected_revision != unit.knowledge_revision:
-            replacement = self.schedule_study_notes(unit, reason="knowledge_changed_before_note_start")
+            replacement = self.schedule_study_notes(
+                unit, reason="knowledge_changed_before_note_start",
+                content_edit_level=task.payload.get("content_edit_level"),
+                layout_edit_level=task.payload.get("layout_edit_level"),
+                history_limit=task.payload.get("history_limit"),
+            )
             return {
                 "learning_unit_id": unit.id,
                 "skipped": True,
@@ -235,14 +393,36 @@ class LearningContentOperations:
                 "replacement_task_id": replacement.id,
             }
         documents = self._unit_documents(unit.id, task.workspace_id)
+        note_documents = [document for document in documents if document.document_kind == "note"]
+        if not note_documents and not task.payload.get("gap_ids"):
+            raise PermanentTaskError("Cannot generate study notes before a note document exists")
         chunks = self._unit_chunks(unit.id, task.workspace_id)
         if not chunks:
             raise PermanentTaskError("Cannot generate study notes before knowledge chunks exist")
+        source_blocks = self._note_source_blocks(note_documents, storage) if note_documents else list(task.payload.get("source_blocks") or [])
+        content_edit_level, layout_edit_level, history_limit = self._note_policy(task, unit)
+        note_document_ids = {document.id for document in note_documents}
         current_point_ids = {
             str((chunk.metadata_ or {}).get("knowledge_point_id"))
             for chunk in chunks
-            if (chunk.metadata_ or {}).get("knowledge_point_id")
+            if chunk.document_id in note_document_ids
+            and (chunk.metadata_ or {}).get("knowledge_point_id")
         }
+        selected_gap_ids = list(dict.fromkeys(task.payload.get("gap_ids") or []))
+        if selected_gap_ids:
+            selected_gap_point_ids = set(
+                self.db.scalars(
+                    select(NoteGapSuggestion.knowledge_point_id).where(
+                        NoteGapSuggestion.workspace_id == task.workspace_id,
+                        NoteGapSuggestion.learning_unit_id == unit.id,
+                        NoteGapSuggestion.id.in_(selected_gap_ids),
+                        NoteGapSuggestion.status.in_(("pending", "draft", "no_base_note")),
+                    )
+                ).all()
+            )
+            if len(selected_gap_point_ids) != len(selected_gap_ids):
+                raise PermanentTaskError("One or more selected note gaps are no longer actionable")
+            current_point_ids.update(selected_gap_point_ids)
         points = (
             self.db.scalars(
                 select(KnowledgePoint).where(
@@ -254,40 +434,42 @@ class LearningContentOperations:
             if current_point_ids
             else []
         )
-        image_note_documents = self._visual_note_documents(documents)
+        image_note_documents = self._visual_note_documents(note_documents)
         visual_document_ids = [document.id for document in image_note_documents]
         result, run = self._skill().execute(
             task=task,
             skill_name="notepatch_scholar_notes",
             input_payload={
                 "learning_unit": self._learning_unit_payload(unit),
-                "documents": [self._document_payload(document) for document in documents],
+                "documents": [self._document_payload(document) for document in note_documents],
+                "source_blocks": source_blocks,
                 "knowledge_chunks": [self._chunk_payload(chunk) for chunk in chunks],
+                "note_policy": {
+                    "content_edit_level": content_edit_level,
+                    "layout_edit_level": layout_edit_level,
+                    "content_rules": {
+                        "verbatim": "Only correct OCR transcription errors by comparing the source image.",
+                        "spelling": "Only correct OCR and source spelling errors.",
+                        "conceptual": "Correct OCR, spelling, and high-confidence serious concept errors without changing voice.",
+                        "rewrite": "Rewriting and expansion are allowed while retaining supported facts.",
+                    }[content_edit_level],
+                    "layout_rules": {
+                        "preserve": "Keep source block order, grouping, and relative layout.",
+                        "minor": "Keep block order; only repair obvious alignment and marginal annotation placement.",
+                        "reorder": "Blocks may move vertically but no source content may be removed.",
+                        "reflow": "A new layout may be designed.",
+                    }[layout_edit_level],
+                },
                 "knowledge_points": [
                     {"id": point.id, "name": point.name, "source_document_ids": point.source_document_ids}
                     for point in points
                 ],
                 "visual_layout_policy": {
-                    "content_authority": "ocr_and_knowledge_base",
-                    "image_role": "layout_reference_only",
-                    "preserve": [
-                        "section_order",
-                        "grouping",
-                        "columns",
-                        "tables",
-                        "diagram_position",
-                        "emphasis_density",
-                    ],
-                    "adaptation": (
-                        "Preserve coherent source layouts conservatively. Improve spacing, alignment, and "
-                        "legibility when the source is weak. Use the NotePatch standard layout only when the "
-                        "source has no meaningful layout. Never embed source images in the output HTML."
-                    ),
+                    "content_authority": "note_source_blocks",
+                    "reference_authority": "knowledge_chunks_may_only_support_declared_concept_corrections",
+                    "image_role": "transcription_and_layout_reference",
+                    "layout_edit_level": layout_edit_level,
                 },
-                "allowed_html_classes": sorted(
-                    ALLOWED_CLASSES
-                    - {"np-highlight", "np-highlight--red", "np-highlight--yellow"}
-                ),
             },
             output_filename="study_note.json",
             schema=ScholarNotesResult,
@@ -296,7 +478,12 @@ class LearningContentOperations:
         self._ensure_active(task)
         self.db.refresh(unit)
         if unit.knowledge_revision != expected_revision:
-            replacement = self.schedule_study_notes(unit, reason="knowledge_changed_during_note_generation")
+            replacement = self.schedule_study_notes(
+                unit, reason="knowledge_changed_during_note_generation",
+                content_edit_level=task.payload.get("content_edit_level"),
+                layout_edit_level=task.payload.get("layout_edit_level"),
+                history_limit=task.payload.get("history_limit"),
+            )
             return {
                 "learning_unit_id": unit.id,
                 "skipped": True,
@@ -307,13 +494,25 @@ class LearningContentOperations:
         result_point_ids = {item.id for item in result.knowledge_points}
         if not result_point_ids.issubset(allowed_point_ids):
             raise PermanentTaskError("Scholar notes returned unknown knowledge point ids")
+        version_id = str(uuid.uuid4())
         try:
-            html = sanitize_note_html(result.html)
+            validate_note_ir(
+                result, source_blocks,
+                content_edit_level=content_edit_level,
+                layout_edit_level=layout_edit_level,
+            )
+            visual_assets = self._materialize_note_assets(
+                task=task,
+                storage=storage,
+                result=result,
+                version_id=version_id,
+                documents=documents,
+            )
+            html = render_note_ir(result)
             validate_note_structure(html)
             validate_knowledge_point_references(html, allowed_point_ids)
         except ValueError as exc:
             raise PermanentTaskError(str(exc)) from exc
-        version_id = str(uuid.uuid4())
         version_no = int(
             self.db.scalar(
                 select(func.coalesce(func.max(StudyNoteVersion.version_no), 0)).where(
@@ -325,10 +524,21 @@ class LearningContentOperations:
         ) + 1
         html_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "study_note", "html")
         json_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "study_note", "json")
+        ir_key = StorageService.learning_unit_note_key(task.workspace_id, unit.id, version_id, "note_ir", "json")
+        source_document_ids = list(
+            dict.fromkeys(
+                str(block.get("document_id"))
+                for block in source_blocks
+                if block.get("document_id")
+            )
+        )
         structured = result.model_dump(mode="json")
+        structured["source_document_ids"] = source_document_ids
         structured["html"] = html
+        structured["policy"] = {"content_edit_level": content_edit_level, "layout_edit_level": layout_edit_level}
         self._put_text(storage, html_key, html, "text/html; charset=utf-8")
         storage.put_json_artifact(json_key, structured, bucket=storage.bucket)
+        storage.put_json_artifact(ir_key, result.note_ir.model_dump(mode="json"), bucket=storage.bucket)
         self._ensure_active(task)
         note = StudyNoteVersion(
             id=version_id,
@@ -339,8 +549,11 @@ class LearningContentOperations:
             title=result.title,
             html_object_key=html_key,
             json_object_key=json_key,
+            note_ir_object_key=ir_key,
+            content_edit_level=content_edit_level,
+            layout_edit_level=layout_edit_level,
             knowledge_point_ids=[item.id for item in result.knowledge_points],
-            source_document_ids=result.source_document_ids or [document.id for document in documents],
+            source_document_ids=source_document_ids,
             source_mistake_ids=[],
             edit_origin="skill",
             metadata_={
@@ -352,16 +565,52 @@ class LearningContentOperations:
                 "visual_reference_selection_policy": run.get("visual_reference", {}).get(
                     "selection_policy", "latest_8_image_notes"
                 ),
+                "content_edit_level": content_edit_level,
+                "layout_edit_level": layout_edit_level,
+                "history_limit": history_limit,
+                "visual_assets": visual_assets,
+                "legacy": False,
             },
         )
         self.db.add(note)
+        self.db.flush()
+        for correction in result.corrections:
+            self.db.add(StudyNoteCorrection(
+                workspace_id=task.workspace_id, learning_unit_id=unit.id, note_version_id=note.id,
+                source_block_id=correction.source_block_id, correction_type=correction.correction_type,
+                original_text=correction.original_text, corrected_text=correction.corrected_text,
+                reason=correction.reason, confidence=correction.confidence, source_refs=correction.source_refs,
+            ))
+        if selected_gap_ids:
+            for suggestion in self.db.scalars(
+                select(NoteGapSuggestion).where(
+                    NoteGapSuggestion.workspace_id == task.workspace_id,
+                    NoteGapSuggestion.learning_unit_id == unit.id,
+                    NoteGapSuggestion.id.in_(selected_gap_ids),
+                )
+            ).all():
+                suggestion.status = "accepted"
+                suggestion.accepted_version_id = note.id
         unit.notes_generated_revision = expected_revision
         unit.note_generation_due_at = None
+        for note_set in self.db.scalars(
+            select(NoteSet).where(
+                NoteSet.workspace_id == task.workspace_id,
+                NoteSet.learning_unit_id == unit.id,
+                NoteSet.status == "processing",
+            )
+        ).all():
+            note_set.status = "ready"
         self._ensure_active(task)
         self.db.commit()
         self._ensure_active(task)
         flashcard_task = self.schedule_flashcards(unit, note, reason="study_note_generated")
-        downstream_tasks = [flashcard_task]
+        retention_task = TaskService(self.db).create_task(
+            workspace_id=unit.workspace_id, task_type="purge_study_note_history",
+            resource_type="learning_unit", resource_id=unit.id,
+            payload={"learning_unit_id": unit.id, "keep_history": history_limit},
+        )
+        downstream_tasks = [flashcard_task, retention_task]
         mistakes = self.db.scalars(
             select(Mistake).where(
                 Mistake.workspace_id == task.workspace_id,

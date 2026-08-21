@@ -102,6 +102,10 @@ class FakeStorage:
         payload = self.objects[(bucket or self.bucket, object_key)]["body"]
         return payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
 
+    def get_object_bytes(self, bucket: str, object_key: str) -> bytes:
+        payload = self.objects[(bucket, object_key)]["body"]
+        return payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+
     def delete_prefix(self, prefix: str) -> None:
         for key in list(self.objects):
             if key[1].startswith(prefix):

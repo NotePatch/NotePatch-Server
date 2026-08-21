@@ -8,6 +8,7 @@ from notepatch.modules.learning.schemas.skills import (
     GradingSkillResult,
     KnowledgeBuildResult,
     NoteHighlightResult,
+    NoteSupplementResult,
     QuestionExtractionResult,
     ScholarNotesResult,
 )
@@ -99,16 +100,28 @@ class FakeSkillRunner:
             document_ids = [item["id"] for item in input_payload.get("documents", [])]
             knowledge_points = input_payload.get("knowledge_points", [])
             point = knowledge_points[0]
+            source_blocks = input_payload["source_blocks"]
             payload = {
                 "title": "Linear Functions Scholar Notes",
-                "html": (
-                    '<article class="np-note"><header class="np-note-header">'
-                    '<h1 class="np-note-title">Linear Functions Scholar Notes</h1>'
-                    '<p class="np-note-summary">A compact review of linear functions.</p></header>'
-                    f'<section class="np-note-section np-knowledge-point" '
-                    f'data-knowledge-point-id="{point["id"]}"><h2>Linear Functions</h2>'
-                    "<p><strong>Linear functions</strong> have a constant rate of change.</p></section></article>"
-                ),
+                "note_ir": {
+                    "summary": "A compact review of linear functions.",
+                    "blocks": [
+                        {
+                            "id": f"note-block-{index}",
+                            "type": "text",
+                            "source_block_ids": [source["id"]],
+                            "source_document_id": source["document_id"],
+                            "page_index": source["page_index"],
+                            "bbox": source["bbox"],
+                            "reading_order": source["reading_order"],
+                            "knowledge_point_id": point["id"],
+                            "text": source["text"],
+                            "confidence": 0.99,
+                        }
+                        for index, source in enumerate(source_blocks, start=1)
+                    ],
+                },
+                "corrections": [],
                 "outline": ["Linear Functions"],
                 "knowledge_points": [
                     {"id": point["id"], "name": point["name"], "section_id": "linear-functions"}
@@ -116,6 +129,7 @@ class FakeSkillRunner:
                 "review_suggestions": ["Practice slope questions"],
                 "source_document_ids": document_ids,
             }
+
         elif schema is GradingSkillResult:
             mode = input_payload.get("required_grading_mode", "provisional")
             grading_points = input_payload.get("knowledge_points") or [{}]
@@ -153,6 +167,15 @@ class FakeSkillRunner:
                         "question_sequence_no": 1,
                     }
                 ],
+            }
+        elif schema is NoteSupplementResult:
+            point = input_payload["knowledge_point"]
+            payload = {
+                "html": (
+                    f'<section id="gap-{point["id"]}" class="np-note-section np-reinforcement" '
+                    f'data-knowledge-point-id="{point["id"]}"><h2>{point["name"]}</h2>'
+                    "<p>Evidence-backed supplement.</p></section>"
+                )
             }
         elif schema is NoteHighlightResult:
             note = input_payload["study_note_html"]

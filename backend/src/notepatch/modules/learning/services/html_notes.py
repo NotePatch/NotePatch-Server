@@ -35,6 +35,8 @@ ALLOWED_TAGS = {
     "br",
     "sup",
     "sub",
+    "figure",
+    "figcaption",
 }
 ALLOWED_CLASSES = {
     "np-note",
@@ -58,6 +60,11 @@ ALLOWED_CLASSES = {
     "np-section-card",
     "np-keyword",
     "np-divider",
+    "np-code",
+    "np-annotation",
+    "np-annotation-marker",
+    "np-source-block",
+    "np-source-fragment",
 }
 KNOWLEDGE_POINT_ATTRIBUTE = re.compile(r'data-knowledge-point-id="([^"]+)"')
 
@@ -68,7 +75,7 @@ def sanitize_note_html(value: str) -> str:
         tags=ALLOWED_TAGS,
         clean_content_tags={"script", "style", "iframe", "object", "embed", "svg", "math"},
         attributes={
-            "*": {"id", "data-knowledge-point-id"},
+            "*": {"id", "data-knowledge-point-id", "data-note-asset-id", "data-language"},
             "th": {"colspan", "rowspan", "scope"},
             "td": {"colspan", "rowspan"},
         },

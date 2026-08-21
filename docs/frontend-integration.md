@@ -839,21 +839,11 @@ async function getDocumentArtifacts(workspaceId: string, documentId: string) {
 
 ## Automatic Learning Workflow
 
-后端现在可以开启自动学习流水线：`AUTO_LEARNING_PIPELINE=true`。前端上传完成后不需要额外编排 OpenClaw、OCR、知识库或批改服务，只需要跟随 task 状态和读取结果 API。
-
-资料类文档推荐设置：
+客户端只负责上传、选择笔记策略、跟踪聚合 workflow 和读取结果，不直接编排 OCR、OpenClaw 或 worker。
 
 ```ts
-type DocumentKind =
-  | "courseware"
-  | "note"
-  | "exam"
-  | "homework"
-  | "corrected_homework"
-  | "answer_key"
-  | "rubric"
-  | "chat_attachment"
-  | "other";
+type NoteContentEditLevel = "verbatim" | "spelling" | "conceptual" | "rewrite";
+type NoteLayoutEditLevel = "preserve" | "minor" | "reorder" | "reflow";
 
 type LearningMetadata = {
   learning_unit_id?: string;
@@ -861,138 +851,184 @@ type LearningMetadata = {
   subject?: string;
   grade_level?: string;
   topic?: string;
-  auto_group_learning_unit?: boolean; // 默认 true
+  auto_group_learning_unit?: boolean;
+  note_set_id?: string;
+  page_index?: number;
+  note_content_edit_level?: NoteContentEditLevel;
+  note_layout_edit_level?: NoteLayoutEditLevel;
 };
 ```
 
-上传 `courseware` 或 `note` 后，后端流程是：
+资料分流：
 
-```text
-complete-upload
-  -> document_processing_pipeline
-  -> OCR artifacts
-  -> build_knowledge_base
-  -> debounce after last knowledge update (300s by default)
-  -> generate_study_notes
-  -> generate_flashcards
-```
+- `note`：OCR → KB → 防抖 → 忠实电子笔记 → 闪卡。
+- `courseware/other`：OCR → KB → 笔记缺口；不自动生成笔记。
+- `homework/corrected_homework`：OCR → 切题 → 评分 → 缺口；已有笔记时才高亮。
+- `exam`：OCR → 切题 → 缺口。
+- `answer_key/rubric`：OCR 后作为评分依据。
+- `chat_attachment`：只进入聊天上下文，不进入学习流水线。
 
-`build_knowledge_base` 与笔记生成是两个独立生命周期。300 秒仅表示最后一次知识更新后的最早启动时间，不表示笔记会在 300 秒内完成。OpenClaw skill 执行、schema 校验、HTML 清洗、SeaweedFS 写入以及最多 3 次任务重试都会继续占用时间。
+### Note Preferences And One-Off Overrides
 
-当学习单元包含图片类 note 时，笔记 worker 会把 OCR/知识库作为内容依据，并自动选择最新 8 张可用图片笔记作为视觉排版参考。图片仅帮助模型理解章节顺序、分栏、表格、知识框和强调方式；不会被嵌入最终 HTML，也不会覆盖 OCR 事实。模型不支持视觉输入时后端会自动降级到 OCR-only，前端无需增加参数或重试逻辑。可在 task events 中观察 study_note_visual_references_selected、study_note_visual_applied 或 study_note_visual_fallback；事件只包含文档 ID、数量、模型和脱敏原因。
-
-`other` 不会在上传完成后自动处理；用户显式调用 `process` 后，它会走与课件/笔记相同的知识库和笔记分支。`exam` 只执行 OCR 和题目提取，不会自动创建普通 Homework、知识库或电子笔记。`answer_key/rubric` 只执行 OCR，随后由 Homework references 使用。
-
-上传作业后，如果请求顶层带 `learning_unit_id`，后端会先按 `workspace_id + learning_unit_id` 校验并显式归组。未指定时会先按 `learning_unit_title/subject/grade_level/topic` 精确匹配；仍未匹配的资料在 OCR 后进入语义归组，只有相似度至少 `0.90` 且领先第二候选至少 `0.05` 才加入已有单元，否则创建新单元。`auto_group_learning_unit=false` 会跳过精确与语义归组并在 OCR 后创建新单元。Embedding 不可用会记录 warning 并创建新单元，不会阻断 OCR 主流程：
-
-```text
-complete-upload
-  -> document_processing_pipeline
-  -> OCR artifacts
-  -> extract_questions
-  -> grade_homework
-  -> mistakes + mistake knowledge chunks
-  -> highlight latest study note when one exists
-  -> regenerate weighted flashcards when one exists
-```
-
-前端查询学习结果：
+读取用户时会返回：
 
 ```ts
-type LearningUnit = {
-  id: string;
-  title: string;
-  subject: string | null;
-  grade_level: string | null;
-  topic: string | null;
-  knowledge_revision: number;
-  attempt_revision: number;
-  notes_generated_revision: number;
-  note_generation_due_at: string | null;
+type NotePreferences = {
+  note_content_edit_level: NoteContentEditLevel;
+  note_layout_edit_level: NoteLayoutEditLevel;
+  note_history_limit: number; // 0..100，指最新版本之外保留数量
 };
-
-type StudyNoteVersion = {
-  id: string;
-  workspace_id: string;
-  learning_unit_id: string;
-  task_id: string | null;
-  version_no: number;
-  title: string;
-  html_object_key: string;
-  json_object_key: string;
-  highlighted_html_object_key: string | null;
-  highlight_map_object_key: string | null;
-  knowledge_point_ids: string[];
-  source_document_ids: string[];
-  source_mistake_ids: string[];
-  source_version_id: string | null;
-  edited_by_user_id: string | null;
-  edit_origin: "skill" | "user" | "admin" | null;
-  edit_summary: string | null;
-  download_urls?: Record<string, string>;
-  rendering: {
-    theme_id: string;
-    css_url: string;
-    wrapper_class: string;
-  };
-};
-
-async function listLearningUnits(workspaceId: string) {
-  return apiFetch<LearningUnit[]>(`/workspaces/${workspaceId}/learning-units`);
-}
-
-async function listStudyNotes(workspaceId: string, learningUnitId: string) {
-  return apiFetch<StudyNoteVersion[]>(
-    `/workspaces/${workspaceId}/learning-units/${learningUnitId}/notes?include_download_url=true`,
-  );
-}
-
-async function reviseStudyNote(workspaceId: string, learningUnitId: string, latestVersionId: string, html: string) {
-  return apiFetch(
-    `/workspaces/${workspaceId}/learning-units/${learningUnitId}/notes/${latestVersionId}/revisions`,
-    { method: "POST", body: JSON.stringify({ html, edit_summary: "Manual edit" }) },
-  );
-}
-
-function noteGenerationState(unit: LearningUnit, notes: StudyNoteVersion[]) {
-  if (unit.knowledge_revision === 0) return "no_knowledge";
-  if (unit.notes_generated_revision < unit.knowledge_revision) return "generating";
-  return notes.length > 0 ? "ready" : "unavailable";
-}
 ```
 
-可用接口：
+更新全局默认值：
 
 ```http
-GET /workspaces/{workspace_id}/learning-units
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}?include_download_url=true
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/knowledge-chunks
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes?include_download_url=true
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{note_version_id}/download-url?kind=highlighted_html
-POST /workspaces/{workspace_id}/learning-units/{learning_unit_id}/notes/{latest_note_version_id}/revisions
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/latest
-GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks/{deck_id}
+PATCH /api/v1/auth/preferences
+Content-Type: application/json
+
+{"note_content_edit_level":"conceptual","note_layout_edit_level":"minor","note_history_limit":3}
 ```
 
-UI 建议：
+上传 note 时可通过 upload-session 顶层同名字段覆盖本次生成策略。也可手动触发并覆盖：
 
-- 文档处理 task 成功只代表 OCR 主流程结束；课件/笔记还要继续完成知识库和防抖笔记任务。
-- 当 `notes_generated_revision < knowledge_revision` 时显示“正在整理笔记”，每 5-10 秒刷新 learning unit 和 notes；不要在等待 5 分钟后直接判定失败。
-- 当 revisions 相等且 notes 列表非空时展示 `version_no` 最大的版本。若 `knowledge_revision === 0`，表示尚无可用于笔记的知识库内容。
-- notes API 返回 metadata 和短期签名 URL，不内联返回 HTML。展示时优先使用 `download_urls.rendered_html`；只有编辑器需要读取 fragment 时，才使用 `highlighted_html` 或 `html`。
-- `grade_homework` 成功后，刷新 mistakes、knowledge chunks 和 latest note。
-- `rendered_html` 会在服务端自动选择当前高亮或普通 fragment，并套用 `rendering.theme_id` 对应主题；签名过期后重新请求 notes/download-url。
-- 新生成的多模态 HTML 笔记通常使用 notepatch-paper-v2，历史笔记仍可能返回 v1。客户端不得硬编码主题 URL，也不要自行复刻分栏、卡片或高亮 CSS。
-- 修订接口只接受当前最新版本 ID；并发编辑过期时返回 `409`，前端应刷新后让用户重新确认。
-- HTML 必须按不可信内容处理；推荐受控富文本组件或 sandboxed WebView，不执行 script、事件属性或外部资源。
-- 手动编辑创建新版本；错题高亮只更新最新版本的 highlighted HTML artifact。没有笔记时评分不会创建高亮任务。
-- `flashcard-decks/latest` 中每张卡包含 `priority_score` 和 `priority_factors`，可向用户解释错误频率、时间衰减和连续答对降权。
-- 前端不要直接调用 OpenClaw skill；当前 skill 执行和后续替换都由后端 worker 管理。
+```http
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/generate
 
-若笔记长时间未生成，用户端保留“仍在生成/暂不可用”状态；运维端应查看 `generate_study_notes` 的 task events。常见可恢复情况是 gateway 已返回 HTTP 200，但 skill 没有写出必需的 `study_note.json`，worker 会自动重试，最终成功前不要缓存空 notes 列表为永久结果。
+{"content_edit_level":"verbatim","layout_edit_level":"preserve","force_reprocess":false}
+```
 
-后端内部区分 `default`、`ocr`、`chat` 和 `ai` 四个 worker queue：文档处理进入 `ocr`，扫描、purge、merge 等编排任务进入 `default`，交互聊天进入低延迟 `chat`，题目提取、知识库、笔记、批改、高亮和闪卡进入后台 `ai`。这个拆分不改变前端 API；学习 Skill 默认允许最多 300 秒执行，客户端应持续依据 task/events 展示进度。
+四档内容语义：
+
+- `verbatim`：只修复可由原图确认的 OCR 转录错误。
+- `spelling`：额外允许错别字/拼写修复。
+- `conceptual`：额外允许有可靠来源的严重概念修正，不改变表达风格。
+- `rewrite`：允许归纳、扩写和改写。
+
+四档排版语义：
+
+- `preserve`：保持块顺序、分组和相对布局。
+- `minor`：只把边缘批注、公式、图表和代码移回合理位置，不上下调换。
+- `reorder`：允许调换上下顺序，但不删除内容。
+- `reflow`：允许重新设计版式。
+
+策略在 task 创建时固化。服务端会校验 Note IR 的逐块来源、代码缩进、公式、表格、箭头/圈选关系和纠错证据；客户端无需信任模型自行遵守策略。
+
+### Continuous Multi-Image Notes
+
+连续多图必须优先使用 NoteSet：
+
+```http
+POST /api/v1/workspaces/{workspace_id}/note-sets
+
+{
+  "title":"计算机网络第 5 讲",
+  "expected_page_count":4,
+  "learning_unit_id":null,
+  "subject":"computer science",
+  "content_edit_level":"conceptual",
+  "layout_edit_level":"minor"
+}
+```
+
+响应包含 `id/status/learning_unit_id/documents`。随后每张图片创建 upload-session：
+
+```json
+{
+  "filename":"page-01.jpg",
+  "mime_type":"image/jpeg",
+  "file_size":123456,
+  "document_kind":"note",
+  "note_set_id":"...",
+  "page_index":0
+}
+```
+
+`page_index` 从 0 开始且组内唯一。所有 tus 上传完成后调用 `POST /api/v1/workspaces/{workspace_id}/note-sets/{note_set_id}/complete`。若缺页、页仍在上传或类型不是 note，会返回 `409/422`。每页独立 OCR；全部页面 KB 完成后按页序只生成一份笔记。不要把每张图片当作独立 note 单元提交。
+
+### Knowledge Gap UX
+
+```ts
+type NoteGap = {
+  id: string;
+  knowledge_point_id: string;
+  note_version_id: string | null;
+  status: "pending" | "draft" | "no_base_note" | "accepted" | "rejected" | "stale";
+  source_refs: Array<{
+    document_id: string;
+    page_index: number;
+    block_id: string | null;
+    bbox: number[] | null;
+    excerpt: string;
+  }>;
+  target_section_id: string | null;
+  target_anchor: string | null;
+  insert_position: "before" | "after" | "inside";
+};
+```
+
+接口：
+
+```http
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft
+PATCH /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/draft/regenerate
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/accept
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/note-gaps/{gap_id}/reject
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/from-gaps
+```
+
+创建草稿请求可包含 `selected_source_refs/target_section_id/insert_position/instruction`，返回异步 Task。PATCH 草稿可提交 `html/target_section_id/insert_position`；regenerate 提交 `{"feedback":"..." }`。接受草稿会锁定最新笔记并创建新版本；基础版本变化返回 `409`。通过 `rendered_html#target_anchor` 跳转建议位置。状态 `stale` 不允许继续插入。
+
+没有基础笔记时只显示 `no_base_note` 建议。用户选择 gap 后调用 `notes/from-gaps`，后端才创建首版：
+
+```json
+{"gap_ids":["..."],"title":"补充笔记","content_edit_level":"conceptual","layout_edit_level":"minor"}
+```
+
+### Notes, Corrections And Rendering
+
+```ts
+type StudyNoteVersion = {
+  id: string;
+  version_no: number;
+  title: string;
+  note_ir_object_key: string | null;
+  content_edit_level: NoteContentEditLevel;
+  layout_edit_level: NoteLayoutEditLevel;
+  knowledge_point_ids: string[];
+  source_document_ids: string[];
+  download_urls?: Record<string, string>;
+  rendering: { theme_id: string; css_url: string; wrapper_class: string };
+};
+```
+
+查询：
+
+```http
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes?include_download_url=true
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{version_id}/download-url?kind=rendered_html
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{version_id}/corrections
+POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{latest_version_id}/revisions
+GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/latest
+```
+
+优先在 sandboxed WebView 加载 `download_urls.rendered_html`；它会套用版本化 CSS，并可能包含服务端签名渲染的低置信原稿裁剪。不要自行执行 fragment 中的脚本或外部资源。手工编辑创建新版本；高亮只更新最新版本。历史超限删除是异步的，UI 不应假设版本号连续。
+
+图片 note 同时使用 OCR 和原图：OCR 是文字基线，原图用于确认代码、公式、圈选/箭头及布局。模型不支持多模态时会 OCR-only 完成。课件知识库只能作为概念纠错证据，不会被悄悄写入笔记；缺失内容通过 gap UI 由用户确认。
+
+### Workflow Tracking
+
+上传响应中的 `workflow_run_id` 是首选进度入口：
+
+```http
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events/stream
+```
+
+核心 OCR/KB/评分成功、增强笔记失败时总状态可能为 `partially_succeeded`；防抖阶段为 `waiting`。不要把单个 document processing task 成功等同于整条学习流程完成。
 
 `POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口。它创建后端异步 OpenClaw 任务，前端不直接调用 OpenClaw Gateway，也不要启动/停止容器。请求体使用 `{ "prompt": string, "client_locale"?: string, "conversation_id"?: string, "input": object, "options": object }`，其中 `client_locale` 必须是 BCP 47 language tag；Web 可用浏览器 locale，Android 使用当前应用语言或 `Locale.getDefault().toLanguageTag()`。响应是 `TaskRead`；随后轮询 task 与 events 获取 `task.result.answer` 或失败原因。会话历史由后端保存，是否注入 OpenClaw 由用户全局 `ai_history_enabled` 控制。后端会为每个用户维护独立 OpenClaw gateway 配置和用户数据目录；用户在线时 supervisor 保持 gateway 运行，worker 在任务前创建 task-local 文档快照，再把 OpenClaw 输出上传回 SeaweedFS。
 

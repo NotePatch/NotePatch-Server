@@ -83,7 +83,11 @@ def create_upload_session(
             **({"grade_level": payload.grade_level} if payload.grade_level else {}),
             **({"topic": payload.topic} if payload.topic else {}),
             "auto_group_learning_unit": payload.auto_group_learning_unit,
+            **({"note_content_edit_level": payload.note_content_edit_level} if payload.note_content_edit_level else {}),
+            **({"note_layout_edit_level": payload.note_layout_edit_level} if payload.note_layout_edit_level else {}),
         },
+        note_set_id=payload.note_set_id,
+        page_index=payload.page_index,
     )
     return UploadSessionResponse(
         document=document,

@@ -113,12 +113,20 @@ class UploadSessionRequest(BaseModel):
     grade_level: str | None = Field(default=None, max_length=64)
     topic: str | None = Field(default=None, max_length=255)
     auto_group_learning_unit: bool = True
+    note_set_id: str | None = None
+    page_index: int | None = Field(default=None, ge=0)
+    note_content_edit_level: Literal["verbatim", "spelling", "conceptual", "rewrite"] | None = None
+    note_layout_edit_level: Literal["preserve", "minor", "reorder", "reflow"] | None = None
     metadata: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_retention_scope(self):
         if not self.save_to_documents and self.document_kind != "chat_attachment":
             raise ValueError("save_to_documents=false is only valid for chat_attachment uploads")
+        if self.note_set_id is not None and self.document_kind != "note":
+            raise ValueError("note_set_id is only valid for note documents")
+        if (self.note_set_id is None) != (self.page_index is None):
+            raise ValueError("note_set_id and page_index must be provided together")
         return self
 
 

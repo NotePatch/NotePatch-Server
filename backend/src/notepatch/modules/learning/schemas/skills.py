@@ -49,34 +49,57 @@ class ScholarKnowledgePoint(StrictResult):
     section_id: str = Field(min_length=1)
 
 
+class NoteBlockRelation(StrictResult):
+    type: Literal["arrow", "circle", "label", "explains", "references"]
+    target_block_id: str | None = None
+    text: str | None = None
+
+
+class NoteIrBlock(StrictResult):
+    id: str = Field(min_length=1, max_length=128)
+    type: Literal["text", "code", "formula", "table", "diagram", "annotation"]
+    source_block_ids: list[str] = Field(min_length=1)
+    source_document_id: str
+    page_index: int = Field(ge=0)
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    reading_order: int = Field(ge=0)
+    knowledge_point_id: str
+    text: str = ""
+    language: str | None = None
+    latex: str | None = None
+    table_html: str | None = None
+    relations: list[NoteBlockRelation] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    preserve_as_image: bool = False
+
+
+class NoteIrDocument(StrictResult):
+    summary: str = Field(min_length=1)
+    blocks: list[NoteIrBlock] = Field(min_length=1)
+
+
+class NoteCorrectionResult(StrictResult):
+    source_block_id: str
+    correction_type: Literal["ocr", "spelling", "concept"]
+    original_text: str
+    corrected_text: str
+    reason: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    source_refs: list[dict] = Field(default_factory=list)
+
+
 class ScholarNotesResult(StrictResult):
     title: str = Field(min_length=1)
-    html: str = Field(min_length=1)
+    note_ir: NoteIrDocument
+    corrections: list[NoteCorrectionResult] = Field(default_factory=list)
     outline: list[str] = Field(default_factory=list)
     knowledge_points: list[ScholarKnowledgePoint] = Field(min_length=1)
     review_suggestions: list[str] = Field(default_factory=list)
     source_document_ids: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def validate_html_contract(self):
-        from notepatch.modules.learning.services.html_notes import (
-            sanitize_note_html,
-            validate_knowledge_point_references,
-            validate_note_structure,
-        )
 
-        cleaned = sanitize_note_html(self.html)
-        validate_note_structure(cleaned)
-        allowed_ids = {item.id for item in self.knowledge_points}
-        validate_knowledge_point_references(cleaned, allowed_ids)
-        referenced = {item.id for item in self.knowledge_points}
-        missing_sections = referenced - set(
-            __import__("re").findall(r'data-knowledge-point-id="([^"]+)"', cleaned)
-        )
-        if missing_sections:
-            raise ValueError(f"Scholar note sections are missing: {', '.join(sorted(missing_sections))}")
-        self.html = cleaned
-        return self
+class NoteSupplementResult(StrictResult):
+    html: str = Field(min_length=1)
 
 
 class PerQuestionGrade(StrictResult):

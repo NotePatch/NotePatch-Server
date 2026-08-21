@@ -246,6 +246,19 @@ class LearningGradingOperations:
         flashcard_task = None
         if unit is not None and latest_note is not None:
             flashcard_task = self.schedule_flashcards(unit, latest_note, reason="homework_graded")
+        gap_task = None
+        if unit is not None:
+            gap_task = TaskService(self.db).create_task(
+                workspace_id=task.workspace_id,
+                task_type="detect_note_gaps",
+                resource_type="learning_unit",
+                resource_id=unit.id,
+                payload={
+                    "learning_unit_id": unit.id,
+                    "source_grading_result_id": grading.id,
+                    "reason": "homework_graded",
+                },
+            )
         return {
             "homework_id": homework.id,
             "grading_result_id": grading.id,
@@ -261,7 +274,11 @@ class LearningGradingOperations:
             "flashcard_task_id": flashcard_task.id if flashcard_task else None,
             "downstream_tasks": [
                 {"id": child.id, "task_type": child.task_type}
-                for child in [*highlight_tasks, *([flashcard_task] if flashcard_task else [])]
+                for child in [
+                    *highlight_tasks,
+                    *([flashcard_task] if flashcard_task else []),
+                    *([gap_task] if gap_task else []),
+                ]
             ],
         }
 

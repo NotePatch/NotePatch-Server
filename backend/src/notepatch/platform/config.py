@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     metrics_token: str | None = None
     release_revision: str = "dev"
     release_build_time: str = "unknown"
-    schema_revision: str = "202608210001"
+    schema_revision: str = "202608220001"
     rate_limit_enabled: bool = False
     auth_rate_limit_per_minute: int = 20
     upload_rate_limit_per_minute: int = 30

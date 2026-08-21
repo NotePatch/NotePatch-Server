@@ -22,6 +22,9 @@ def run_learning_task(
         "generate_study_notes": ("study_notes", lambda: learning.generate_study_notes(task, storage)),
         "generate_flashcards": ("flashcards", lambda: learning.generate_flashcards(task, storage)),
         "highlight_study_notes": ("note_highlight", lambda: learning.highlight_study_notes(task, storage)),
+        "detect_note_gaps": ("note_gap_detection", lambda: learning.detect_note_gaps(task)),
+        "generate_note_supplement": ("note_supplement", lambda: learning.generate_note_supplement(task)),
+        "purge_study_note_history": ("study_note_history_purge", lambda: learning.purge_study_note_history(task, storage)),
     }
     if task.task_type == "grade_homework":
         homework_id = task.payload.get("homework_id") or task.resource_id
