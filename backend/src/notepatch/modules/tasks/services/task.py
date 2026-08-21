@@ -43,6 +43,9 @@ class TaskService:
             queue_name=queue_name,
             max_attempts=max_attempts,
         )
+        from notepatch.modules.tasks.services.workflow import WorkflowTracker
+
+        WorkflowTracker(self.db).link_task(task)
         self.db.commit()
         self.db.refresh(task)
 
@@ -116,6 +119,9 @@ class TaskService:
         self.db.add(event)
         if progress is not None:
             task.progress = progress
+        from notepatch.modules.tasks.services.workflow import WorkflowTracker
+
+        WorkflowTracker(self.db).mirror_task_event(task, event)
         return event
 
     def find_active_task(

@@ -245,6 +245,57 @@ export type AdminTaskDetail = {
   result?: Record<string, unknown> | null;
 };
 
+export type WorkflowRun = {
+  id: string;
+  workspace_id: string;
+  user_id?: string | null;
+  document_id?: string | null;
+  learning_unit_id?: string | null;
+  trigger_type: string;
+  status: string;
+  core_status: string;
+  enrichment_status: string;
+  current_stage?: string | null;
+  progress: number;
+  waiting_until?: string | null;
+  error_message?: string | null;
+  result: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+export type WorkflowTask = {
+  stage: string;
+  phase: "core" | "enrichment";
+  required: boolean;
+  task: AdminTask & {
+    payload: Record<string, unknown>;
+    result?: Record<string, unknown> | null;
+  };
+};
+
+export type WorkflowDetail = {
+  workflow: WorkflowRun;
+  tasks: WorkflowTask[];
+};
+
+export type WorkflowEvent = {
+  id: string;
+  workflow_run_id: string;
+  task_id?: string | null;
+  sequence_no: number;
+  stage?: string | null;
+  event_type: string;
+  level: string;
+  message: string;
+  progress?: number | null;
+  data: Record<string, unknown>;
+  created_at: string;
+};
+
 export type AdminTaskEvent = {
   id: string;
   task_id: string;

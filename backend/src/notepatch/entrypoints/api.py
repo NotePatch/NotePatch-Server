@@ -15,7 +15,7 @@ from notepatch.modules.ai.api import ai
 from notepatch.modules.documents.api import artifacts, documents, webhooks
 from notepatch.modules.identity.api import auth, presence, profile, workspaces
 from notepatch.modules.learning.api import assets, homeworks, knowledge, learning, mistakes
-from notepatch.modules.tasks.api import tasks
+from notepatch.modules.tasks.api import tasks, workflows
 from notepatch.platform.config import get_settings
 from notepatch.platform.database import SessionLocal
 from notepatch.platform.metrics import HTTP_LATENCY, HTTP_REQUESTS, render_metrics
@@ -59,6 +59,8 @@ for router in (
     documents.router,
     artifacts.router,
     tasks.router,
+    workflows.router,
+    workflows.document_router,
     assets.router,
     homeworks.router,
     learning.router,

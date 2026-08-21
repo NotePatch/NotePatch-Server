@@ -275,7 +275,7 @@ USER_AVATAR_MAX_SIZE_MB=5
 USER_AVATAR_MAX_DIMENSION=4096
 ```
 
-部署该功能前必须执行 `alembic upgrade head`，使数据库达到 revision `202608200001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
+部署该功能前必须执行 `alembic upgrade head`，使数据库达到当前 head revision `202608210001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
 
 这些新接口返回统一 envelope：`{"code":"ok","message":"...","data":{...}}`。现有 task、document 和 chat 创建接口保持原响应结构。
 
@@ -371,7 +371,7 @@ curl -s http://localhost:8001/api/v1/workspaces/$WORKSPACE_ID/documents/upload-s
 tusd 上传完成后会调用：
 
 ```http
-POST /webhooks/tusd?secret=<TUSD_WEBHOOK_SECRET>
+POST /api/v1/webhooks/tusd?secret=<TUSD_WEBHOOK_SECRET>
 ```
 
 FastAPI 会校验 metadata 中的 `upload_session_id/document_id/upload_token`，然后从共享 volume 读取 tusd 文件并写入 SeaweedFS S3，最后：
@@ -390,6 +390,13 @@ curl -s http://localhost:8001/api/v1/workspaces/$WORKSPACE_ID/documents/complete
 ```
 
 如果 tusd 文件尚未完成，会返回 `409 Upload not finished`。
+
+
+公网反向代理必须让 tusd 返回的 `Location` 保留 HTTPS 与随机公开前缀：
+`https://PUBLIC_IP/np-<prefix>/files/{upload_id}`。仓库中的 Nginx 模板会重写该响应头，
+同时 tusd 以 `-behind-proxy` 启动。若 upload info 显示 `Size > 0`、`Offset = 0`，说明
+只创建了 tus 资源但没有收到任何文件 PATCH；该记录不能进入 OCR 或评分，应由客户端
+使用原 `upload.url` 恢复上传，或重新创建上传会话。
 
 ## Documents And Artifacts
 
@@ -683,7 +690,21 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 6. 有答案或 rubric 时为 `official` 评分；没有依据时必须为 `provisional` 诊断性评分并带置信度。
 7. 错题会写入 mistakes 和带 BGE-M3 embedding 的知识块；学习单元已有笔记时才由 `notepatch_note_highlighter` 更新最新电子笔记，否则明确跳过高亮。
 
-学习单元优先使用有效的 `learning_unit_id`；未指定时每个文件创建一个独立学习单元，不再落入共享的“未归类学习单元”。当前是个人 workspace-only，所有 learning tables 都带 `workspace_id`。
+评分成功后，Homework 列表和详情的 `latest_grading_result` 直接提供最新 `score/max_score/grading_mode/confidence`；完整历史通过 `GET /api/v1/workspaces/{workspace_id}/homeworks/{homework_id}/grading-results` 查询。未完成 tus 上传的文档仍是 `uploading`，不会创建 Homework 或触发评分。
+
+学习单元优先使用显式 `learning_unit_id`。未指定时，后端先按规范化标题、学科、年级和主题做唯一精确匹配；仍未匹配的资料会在 OCR 后进入 `assign_learning_unit`，使用 BGE-M3 比较当前 workspace 的知识块。最高分至少 `0.90` 且领先第二候选至少 `0.05` 时自动归入已有单元，否则为该文件创建新单元。Embedding 暂时不可用只会产生 warning 并创建新单元，不阻断核心流程。当前是 personal workspace-only，所有学习与工作流查询都必须带 `workspace_id`。
+
+上传响应包含 `workflow_run_id`，Document 包含 `latest_workflow_run_id`。客户端应优先跟踪聚合工作流，而不是自行拼接多个 task：
+
+```http
+GET /api/v1/workspaces/{workspace_id}/workflows?page=1&page_size=50
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events
+GET /api/v1/workspaces/{workspace_id}/workflows/{workflow_run_id}/events/stream
+GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/workflow
+```
+
+工作流将上传、OCR、归组、知识库/题目提取/评分视为 `core_status`，将延迟笔记、闪卡和高亮视为 `enrichment_status`。核心结果已可用但增强失败时总状态为 `partially_succeeded`；笔记处于防抖或延迟重试时为 `waiting`，并提供 `waiting_until`。SSE 使用 `WorkflowEvent.sequence_no` 作为 `Last-Event-ID`，终态发送 `done` 后关闭。
 
 查询结果：
 
@@ -709,6 +730,8 @@ GET /workspaces/{workspace_id}/learning-units/{learning_unit_id}/flashcard-decks
 
 笔记是经过后端白名单清洗的 HTML fragment，禁止 script、iframe、事件属性、任意 style 和外部资源。修订请求使用 `{ "html": "<article>...</article>", "title": "...", "edit_summary": "..." }`。手动编辑总是创建递增版本；AI 高亮只更新最新版本关联的 `highlighted_html` artifact，不创建版本。管理后台使用富文本编辑器，Android 应使用受控 HTML 渲染。
 
+图片类 note 生成学霸笔记时，OCR 与知识库仍是文字事实的权威来源，原图只作为排版参考。后端从当前学习单元选择最新 8 张可用图片笔记，按时间顺序发送给支持多模态的用户所选模型；模型参考章节顺序、分组、分栏、表格和强调密度，并可修正歪斜、间距与可读性。JPEG/PNG/WebP 在网关限制内直接使用，TIFF 或超限图片只在 task-local 目录生成临时 JPEG 预览，不新增业务 artifact。若 provider 明确拒绝图片输入，任务会记录 study_note_visual_fallback 并自动用 OCR-only 完成；鉴权、网络和服务端错误不会被当作能力降级。新生成笔记使用 notepatch-paper-v2，历史笔记继续使用 v1；客户端始终按 rendering.theme_id/css_url 或 download_urls.rendered_html 展示。视觉来源和实际模式保存在笔记 metadata，任务事件还会出现 study_note_visual_references_selected 与 study_note_visual_applied。
+
 知识点答题历史同时记录正确、部分正确和错误。闪卡优先级由后端确定性计算：错误次数与近期错误提高权重，时间会衰减，近期连续答对通过 success pressure 和 streak multiplier 降低旧错题权重。OpenClaw 只生成卡片文本；卡组、卡片、权重和权重因子持久化在 PostgreSQL。
 
 首次升级到 HTML 笔记前先 dry-run，再执行清理和自动重建：
@@ -719,6 +742,15 @@ docker compose exec api python /opt/notepatch/scripts/reset_study_notes_to_html.
 ```
 
 该脚本永久删除旧 Markdown 笔记、高亮和闪卡输出，但保留原始文档、OCR 与仍存在的有效知识块，并安排 5 分钟后的 HTML 笔记生成。若某学习单元的历史知识块此前已经被清理，脚本不会凭空重建笔记；需要重新处理对应课件/笔记，使 `build_knowledge_base` 先恢复知识块。
+
+历史自动创建的碎片单元可先 dry-run，再按高置信结果创建现有异步 merge task：
+
+```bash
+docker compose exec api python /opt/notepatch/scripts/reconcile_learning_units.py
+docker compose exec api python /opt/notepatch/scripts/reconcile_learning_units.py --workspace-id <workspace-id> --apply
+```
+
+历史合并阈值默认 `0.94`、领先差值 `0.08`，仅自动合并 `metadata.source=automatic_pipeline` 的单元；手工单元可作为目标但不会作为自动删除的来源。原始文档和评分审计不删除。
 
 后台会为每个用户 OpenClaw runtime 写入内置 skill 说明：
 
@@ -766,7 +798,7 @@ docker compose --profile ocr up -d --build ocr-worker
 docker compose exec ocr-worker python /opt/notepatch/scripts/ocr_smoke_test.py /path/to/sample.png
 ```
 
-`ocr-worker` 使用 `paddleocr-cache:/models/paddlex` 持久化模型；`embedding-service` 使用 `bge-cache`。DocTr、PaddleOCR 和 BGE-M3 通过 Redis GPU lease 全局串行，lease 带 token、TTL 和自动续租。`OCR_WORKER_CONCURRENCY=1`，单卡部署不要横向扩容 GPU worker。
+`ocr-worker` 使用 `paddleocr-cache:/models/paddlex` 持久化模型；`embedding-service` 使用 `bge-cache`。默认单张 16 GB GPU 部署中，PaddleOCR 使用 GPU 和 `auto_growth` 分配策略，DocTr 在每次请求后卸载模型并释放显存，BGE-M3 通过 `EMBEDDING_DEVICE=cpu` 运行。这样避免三个大型模型同时常驻导致 PP-StructureV3 OOM。GPU 操作仍通过 Redis lease 串行，lease 带 token、TTL 和自动续租；`OCR_WORKER_CONCURRENCY=1`，单卡部署不要横向扩容 GPU worker。显存更大的部署可显式设置 `EMBEDDING_DEVICE=cuda:0`，但应先完成并发 OCR 压力测试。
 
 宿主 NVIDIA 驱动更新、重载或 GPU reset 后，长期运行的 GPU 容器可能保留失效的 NVML 注入，表现为 `Paddle CUDA runtime is unavailable: No CUDA device is visible` 或 `Failed to initialize NVML`。先确认没有 queued/running 的 GPU/AI task，再重新创建容器；单纯 `restart` 不足以刷新 NVIDIA runtime：
 
@@ -858,7 +890,7 @@ Last-Event-ID: 12
 
 SSE emits monotonic event IDs, heartbeat comments, and a final `done` event. Existing polling remains supported.
 
-Study notes are validated safe HTML fragments. Clients should prefer the signed `download_urls.rendered_html` URL, which wraps the newest highlighted/plain fragment with the immutable `notepatch-paper-v1` theme and a strict CSP. The public stylesheet is `/api/v1/assets/note-themes/notepatch-paper-v1.css`.
+Study notes are validated safe HTML fragments. Clients should prefer the signed download_urls.rendered_html URL, which wraps the newest highlighted/plain fragment with the note version's immutable theme and a strict CSP. Legacy notes use notepatch-paper-v1; newly generated notes use notepatch-paper-v2. Clients must use rendering.theme_id and rendering.css_url instead of hard-coding either stylesheet.
 
 ### Operations
 

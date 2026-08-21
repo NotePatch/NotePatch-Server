@@ -48,6 +48,7 @@ class Document(Base):
         Index("ix_documents_purge_status", "purge_status"),
         Index("ix_documents_workspace_retention", "workspace_id", "retention_scope", "status"),
         Index("ix_documents_chat_conversation_id", "chat_conversation_id"),
+        Index("ix_documents_latest_workflow_run_id", "latest_workflow_run_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -79,6 +80,9 @@ class Document(Base):
     purge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     purge_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_workflow_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

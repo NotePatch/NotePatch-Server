@@ -171,6 +171,13 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: int = 300
     knowledge_search_limit: int = 6
 
+    learning_unit_auto_group_enabled: bool = True
+    learning_unit_auto_group_threshold: float = 0.90
+    learning_unit_auto_group_min_margin: float = 0.05
+    learning_unit_historical_merge_threshold: float = 0.94
+    learning_unit_historical_merge_min_margin: float = 0.08
+    learning_unit_grouping_text_max_chars: int = 4000
+
     auto_learning_pipeline: bool = True
     task_sse_poll_seconds: float = 1.0
     task_sse_heartbeat_seconds: float = 15.0
@@ -178,7 +185,7 @@ class Settings(BaseSettings):
     metrics_token: str | None = None
     release_revision: str = "dev"
     release_build_time: str = "unknown"
-    schema_revision: str = "202608200001"
+    schema_revision: str = "202608210001"
     rate_limit_enabled: bool = False
     auth_rate_limit_per_minute: int = 20
     upload_rate_limit_per_minute: int = 30

@@ -9,13 +9,16 @@ from sqlalchemy.orm import Session
 from notepatch.platform.config import get_settings
 from notepatch.modules.documents.models.document import (
     AUTO_LEARNING_DOCUMENT_KINDS,
+    CHAT_ATTACHMENT_KIND,
     Document,
     DocumentArtifact,
 )
 from notepatch.modules.documents.models.upload import UploadSession
 from notepatch.modules.identity.models.user import User
+from notepatch.modules.learning.services.assignment import LearningUnitAssignmentService
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.tasks.services.workflow import WorkflowTracker
 from notepatch.platform.storage import StorageService
 from notepatch.modules.documents.services.tusd import TusdService
 from notepatch.shared.filenames import infer_file_type, sanitize_filename
@@ -69,6 +72,14 @@ class UploadService:
         )
         self.db.add(document)
         self.db.flush()
+        if document.document_kind != CHAT_ATTACHMENT_KIND:
+            LearningUnitAssignmentService(self.db, storage=self.storage).preassign(document)
+        workflow = WorkflowTracker(self.db).create_for_document(
+            document,
+            user_id=user.id,
+            trigger_type="upload",
+            waiting_upload=True,
+        )
 
         upload_session = UploadSession(
             workspace_id=workspace_id,
@@ -209,6 +220,9 @@ class UploadService:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=document.scan_message)
 
         document.status = "scanning" if self.settings.clamav_enabled else "uploaded"
+        workflow = WorkflowTracker(self.db).latest_for_document(document.workspace_id, document.id)
+        if workflow is not None:
+            WorkflowTracker(self.db).mark_upload_completed(workflow, document)
         document.scan_status = "pending" if self.settings.clamav_enabled else "skipped"
         document.scan_message = None
         document.bucket = upload_session.bucket
@@ -252,8 +266,12 @@ class UploadService:
                     task_type="scan_document",
                     resource_type="document",
                     resource_id=document.id,
-                    payload={"document_id": document.id},
+                    payload={
+                        "document_id": document.id,
+                        "workflow_run_id": document.latest_workflow_run_id,
+                    },
                 )
+                WorkflowTracker(self.db).link_task(scan_task)
 
         self.db.commit()
         self.db.refresh(document)
@@ -268,6 +286,9 @@ class UploadService:
             LearningWorkflowService(self.db, self.storage).schedule_after_upload(document)
             if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
                 document.status = "ready"
+                workflow = WorkflowTracker(self.db).latest_for_document(document.workspace_id, document.id)
+                if workflow is not None:
+                    WorkflowTracker(self.db).mark_ready_without_tasks(workflow, document)
                 self.db.commit()
                 self.db.refresh(document)
 
@@ -283,6 +304,7 @@ class UploadService:
         )
         if document is not None and document.status != "deleted":
             document.status = "failed"
+            WorkflowTracker(self.db).mark_upload_failed(document, f"Upload {status_value}")
         self.db.commit()
 
 

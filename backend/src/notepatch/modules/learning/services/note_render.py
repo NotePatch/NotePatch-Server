@@ -8,12 +8,18 @@ import jwt
 from fastapi import HTTPException, status
 
 from notepatch.modules.learning.models.learning import StudyNoteVersion
+from notepatch.modules.learning.services.note_themes import (
+    DEFAULT_NOTE_THEME_ID,
+    NOTE_THEME_WRAPPER_CLASS,
+    note_theme_css_path,
+    note_theme_id,
+)
 from notepatch.platform.config import Settings, get_settings
 
 
-THEME_ID = "notepatch-paper-v1"
-THEME_CSS_PATH = "/api/v1/assets/note-themes/notepatch-paper-v1.css"
-WRAPPER_CLASS = "np-note-theme"
+THEME_ID = DEFAULT_NOTE_THEME_ID
+THEME_CSS_PATH = note_theme_css_path(DEFAULT_NOTE_THEME_ID)
+WRAPPER_CLASS = NOTE_THEME_WRAPPER_CLASS
 
 
 class NoteRenderService:
@@ -52,7 +58,7 @@ class NoteRenderService:
         return payload
 
     def wrap_html(self, note: StudyNoteVersion, fragment: str) -> str:
-        css_url = self.settings.public_route_url(THEME_CSS_PATH)
+        css_url = self.settings.public_route_url(note_theme_css_path(note_theme_id(note)))
         title = escape(note.title)
         return (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"

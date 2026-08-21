@@ -78,6 +78,7 @@ class DocumentRead(ORMModel):
     purge_status: str | None = None
     purge_task_id: str | None = None
     purged_at: datetime | None = None
+    latest_workflow_run_id: str | None = None
     metadata: dict = metadata_field()
     created_at: datetime
     updated_at: datetime
@@ -106,6 +107,12 @@ class UploadSessionRequest(BaseModel):
     document_kind: DocumentKind = "other"
     save_to_documents: bool = True
     title: str | None = Field(default=None, max_length=255)
+    learning_unit_id: str | None = None
+    learning_unit_title: str | None = Field(default=None, max_length=255)
+    subject: str | None = Field(default=None, max_length=64)
+    grade_level: str | None = Field(default=None, max_length=64)
+    topic: str | None = Field(default=None, max_length=255)
+    auto_group_learning_unit: bool = True
     metadata: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -123,6 +130,7 @@ class UploadSessionResponse(BaseModel):
     tus_metadata_header: str
     bucket: str
     object_key: str
+    workflow_run_id: str | None = None
 
 
 class CompleteUploadRequest(BaseModel):

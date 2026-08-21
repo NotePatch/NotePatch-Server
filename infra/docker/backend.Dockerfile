@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ARG RELEASE_REVISION=dev
 ARG RELEASE_BUILD_TIME=unknown
-ARG SCHEMA_REVISION=202608200001
+ARG SCHEMA_REVISION=202608210001
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY backend ./backend
 COPY openclaw ./openclaw
 COPY scripts ./scripts
+COPY compose.yml ./compose.yml
+COPY infra/docker ./infra/docker
+COPY infra/proxy ./infra/proxy
 
 WORKDIR /opt/notepatch/backend
 EXPOSE 8000

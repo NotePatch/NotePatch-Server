@@ -62,6 +62,7 @@ def test_openclaw_backed_learning_tasks_route_to_ai_queue(client, db_sessionmake
     workspace_id = first_workspace_id(client, user["access_token"])
 
     task_types = [
+        "assign_learning_unit",
         "extract_questions",
         "build_knowledge_base",
         "generate_study_notes",

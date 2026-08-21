@@ -29,7 +29,9 @@ from notepatch.modules.learning.models.learning import (
     LearningUnitDocument,
     StudyNoteVersion,
 )
+from notepatch.modules.learning.models.assignment import LearningUnitAssignment
 from notepatch.modules.tasks.models.task import Task, TaskEvent
+from notepatch.modules.tasks.models.workflow import WorkflowEvent, WorkflowRun, WorkflowTaskLink
 
 __all__ = [
     "ChatConversation",
@@ -47,6 +49,7 @@ __all__ = [
     "FlashcardDeck",
     "Flashcard",
     "LearningUnit",
+    "LearningUnitAssignment",
     "LearningUnitDocument",
     "Mistake",
     "Permission",
@@ -59,6 +62,9 @@ __all__ = [
     "StudyNoteVersion",
     "Task",
     "TaskEvent",
+    "WorkflowEvent",
+    "WorkflowRun",
+    "WorkflowTaskLink",
     "UploadSession",
     "User",
     "Workspace",

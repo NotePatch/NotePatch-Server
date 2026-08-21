@@ -8,15 +8,19 @@ from sqlalchemy.orm import Session
 from notepatch.entrypoints.deps import get_storage_service
 from notepatch.modules.learning.models.learning import StudyNoteVersion
 from notepatch.modules.learning.services.note_render import NoteRenderService
+from notepatch.modules.learning.services.note_themes import NOTE_THEME_FILES
 from notepatch.platform.database import get_db
 from notepatch.platform.storage import StorageService
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
 
-@router.get("/note-themes/notepatch-paper-v1.css", include_in_schema=True)
-def note_theme() -> Response:
-    css = files("notepatch.modules.learning.assets").joinpath("notepatch-paper-v1.css").read_text(encoding="utf-8")
+@router.get("/note-themes/{theme_id}.css", include_in_schema=True)
+def note_theme(theme_id: str) -> Response:
+    filename = NOTE_THEME_FILES.get(theme_id)
+    if filename is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note theme not found")
+    css = files("notepatch.modules.learning.assets").joinpath(filename).read_text(encoding="utf-8")
     return Response(
         content=css,
         media_type="text/css; charset=utf-8",

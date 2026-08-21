@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import threading
@@ -128,6 +129,23 @@ def _models() -> dict[str, Any]:
             if _MODEL_STATE is None:
                 _MODEL_STATE = _load_models()
     return _MODEL_STATE
+
+
+def release_models() -> None:
+    """Release cached DocTr models so the shared GPU is available to OCR."""
+    global _MODEL_STATE
+    with _MODEL_LOCK:
+        models = _MODEL_STATE
+        _MODEL_STATE = None
+    if models is None:
+        return
+    torch = models.get("torch")
+    models.clear()
+    del models
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def _batched_illumination_rectification(models: dict[str, Any], img_geo: Any, output_file: Path) -> None:

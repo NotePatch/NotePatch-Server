@@ -26,6 +26,7 @@ from notepatch.platform.storage import StorageService
 from notepatch.platform.config import get_settings
 from notepatch.platform.rate_limit import RateLimiter
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.tasks.services.workflow import WorkflowTracker
 from notepatch.modules.documents.services.tusd import TusdService
 from notepatch.modules.documents.services.upload import UploadService
 
@@ -74,7 +75,15 @@ def create_upload_session(
         document_kind=payload.document_kind,
         save_to_documents=payload.save_to_documents,
         title=payload.title,
-        metadata=payload.metadata,
+        metadata={
+            **payload.metadata,
+            **({"learning_unit_id": payload.learning_unit_id} if payload.learning_unit_id else {}),
+            **({"learning_unit_title": payload.learning_unit_title} if payload.learning_unit_title else {}),
+            **({"subject": payload.subject} if payload.subject else {}),
+            **({"grade_level": payload.grade_level} if payload.grade_level else {}),
+            **({"topic": payload.topic} if payload.topic else {}),
+            "auto_group_learning_unit": payload.auto_group_learning_unit,
+        },
     )
     return UploadSessionResponse(
         document=document,
@@ -84,6 +93,7 @@ def create_upload_session(
         tus_metadata_header=tus_metadata_header,
         bucket=document.bucket,
         object_key=document.object_key,
+        workflow_run_id=document.latest_workflow_run_id,
     )
 
 
@@ -259,12 +269,29 @@ def process_document(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document upload is not complete")
     if not document.bucket or not document.object_key or not storage.object_exists(document.bucket, document.object_key):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document object is not available")
+    workflow = WorkflowTracker(db).create_for_document(
+        document,
+        user_id=member.user_id,
+        trigger_type="manual_reprocess",
+        waiting_upload=False,
+    )
+    db.commit()
     return task_service.create_task(
         workspace_id=workspace_id,
         task_type="document_processing_pipeline",
         resource_type="document",
         resource_id=document.id,
-        payload={"document_id": document.id, "pipeline": payload.pipeline, "options": payload.options},
+        payload={
+            "document_id": document.id,
+            "pipeline": payload.pipeline,
+            "options": payload.options,
+            "workflow_run_id": workflow.id,
+            **(
+                {"learning_unit_id": document.metadata_["learning_unit_id"]}
+                if isinstance((document.metadata_ or {}).get("learning_unit_id"), str)
+                else {}
+            ),
+        },
     )
 
 

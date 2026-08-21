@@ -1,9 +1,14 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from notepatch.platform.config import get_settings
+from notepatch.modules.learning.services.note_themes import (
+    DEFAULT_NOTE_THEME_ID,
+    NOTE_THEME_WRAPPER_CLASS,
+    normalize_note_theme_id,
+    note_theme_css_url,
+)
 from notepatch.shared.schemas import ORMModel, metadata_field
 
 
@@ -51,13 +56,9 @@ class KnowledgeChunkRead(ORMModel):
 
 
 class StudyNoteRendering(BaseModel):
-    theme_id: str = "notepatch-paper-v1"
-    css_url: str = Field(
-        default_factory=lambda: get_settings().public_route_url(
-            "/api/v1/assets/note-themes/notepatch-paper-v1.css"
-        )
-    )
-    wrapper_class: str = "np-note-theme"
+    theme_id: str = DEFAULT_NOTE_THEME_ID
+    css_url: str = Field(default_factory=lambda: note_theme_css_url(DEFAULT_NOTE_THEME_ID))
+    wrapper_class: str = NOTE_THEME_WRAPPER_CLASS
 
 
 class StudyNoteVersionRead(ORMModel):
@@ -82,6 +83,16 @@ class StudyNoteVersionRead(ORMModel):
     created_at: datetime
     download_urls: dict[str, str] | None = None
     rendering: StudyNoteRendering = Field(default_factory=StudyNoteRendering)
+
+    @model_validator(mode="after")
+    def resolve_rendering_theme(self) -> "StudyNoteVersionRead":
+        theme_id = normalize_note_theme_id(self.metadata.get("theme_id"))
+        self.rendering = StudyNoteRendering(
+            theme_id=theme_id,
+            css_url=note_theme_css_url(theme_id),
+            wrapper_class=NOTE_THEME_WRAPPER_CLASS,
+        )
+        return self
 
 
 class LearningUnitDetailResponse(BaseModel):

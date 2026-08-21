@@ -23,8 +23,14 @@ from notepatch.modules.tasks.models.task import Task
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.platform.storage import StorageService
 from notepatch.modules.learning.services.flashcard_priority import FlashcardPriorityService
-from notepatch.modules.learning.services.html_notes import sanitize_note_html, validate_knowledge_point_references
+from notepatch.modules.learning.services.html_notes import (
+    ALLOWED_CLASSES,
+    sanitize_note_html,
+    validate_knowledge_point_references,
+    validate_note_structure,
+)
 from notepatch.modules.learning.services.knowledge_points import KnowledgePointService
+from notepatch.modules.learning.services.note_themes import CURRENT_NOTE_THEME_ID
 from notepatch.platform.config import get_settings
 
 
@@ -107,6 +113,17 @@ class LearningContentOperations:
             "skill_output_key": run["output_key"],
             "downstream_tasks": [{"id": item.id, "task_type": item.task_type} for item in downstream],
         }
+
+    @staticmethod
+    def _visual_note_documents(documents: list) -> list:
+        eligible = [
+            document
+            for document in documents
+            if document.document_kind == "note"
+            and document.file_type == "image"
+            and document.status in {"uploaded", "ready"}
+        ]
+        return eligible[-8:]
 
     def build_knowledge_base(self, task: Task, storage: StorageService) -> dict:
         document = self._document(task.payload.get("document_id") or task.resource_id, task.workspace_id)
@@ -237,6 +254,8 @@ class LearningContentOperations:
             if current_point_ids
             else []
         )
+        image_note_documents = self._visual_note_documents(documents)
+        visual_document_ids = [document.id for document in image_note_documents]
         result, run = self._skill().execute(
             task=task,
             skill_name="notepatch_scholar_notes",
@@ -248,16 +267,31 @@ class LearningContentOperations:
                     {"id": point.id, "name": point.name, "source_document_ids": point.source_document_ids}
                     for point in points
                 ],
+                "visual_layout_policy": {
+                    "content_authority": "ocr_and_knowledge_base",
+                    "image_role": "layout_reference_only",
+                    "preserve": [
+                        "section_order",
+                        "grouping",
+                        "columns",
+                        "tables",
+                        "diagram_position",
+                        "emphasis_density",
+                    ],
+                    "adaptation": (
+                        "Preserve coherent source layouts conservatively. Improve spacing, alignment, and "
+                        "legibility when the source is weak. Use the NotePatch standard layout only when the "
+                        "source has no meaningful layout. Never embed source images in the output HTML."
+                    ),
+                },
                 "allowed_html_classes": sorted(
-                    {
-                        "np-note", "np-note-header", "np-note-title", "np-note-summary", "np-note-section",
-                        "np-knowledge-point", "np-callout", "np-callout--tip", "np-callout--warning",
-                        "np-formula", "np-table", "np-reinforcement",
-                    }
+                    ALLOWED_CLASSES
+                    - {"np-highlight", "np-highlight--red", "np-highlight--yellow"}
                 ),
             },
             output_filename="study_note.json",
             schema=ScholarNotesResult,
+            visual_document_ids=visual_document_ids,
         )
         self._ensure_active(task)
         self.db.refresh(unit)
@@ -275,6 +309,7 @@ class LearningContentOperations:
             raise PermanentTaskError("Scholar notes returned unknown knowledge point ids")
         try:
             html = sanitize_note_html(result.html)
+            validate_note_structure(html)
             validate_knowledge_point_references(html, allowed_point_ids)
         except ValueError as exc:
             raise PermanentTaskError(str(exc)) from exc
@@ -308,7 +343,16 @@ class LearningContentOperations:
             source_document_ids=result.source_document_ids or [document.id for document in documents],
             source_mistake_ids=[],
             edit_origin="skill",
-            metadata_={"skill": "notepatch_scholar_notes", "skill_output_key": run["output_key"]},
+            metadata_={
+                "skill": "notepatch_scholar_notes",
+                "skill_output_key": run["output_key"],
+                "theme_id": CURRENT_NOTE_THEME_ID,
+                "visual_reference_document_ids": run.get("visual_reference", {}).get("document_ids", []),
+                "visual_reference_mode": run.get("visual_reference", {}).get("mode", "none"),
+                "visual_reference_selection_policy": run.get("visual_reference", {}).get(
+                    "selection_policy", "latest_8_image_notes"
+                ),
+            },
         )
         self.db.add(note)
         unit.notes_generated_revision = expected_revision

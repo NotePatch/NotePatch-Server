@@ -30,6 +30,8 @@ def queue_name_for_task_type(settings: Settings, task_type: str) -> str:
         return settings.ocr_queue_name
     if task_type == "openclaw_agent_run":
         return settings.chat_queue_name
+    if task_type == "assign_learning_unit":
+        return settings.ai_queue_name
     if task_type in OPENCLAW_LEARNING_TASK_TYPES:
         return settings.ai_queue_name
     return settings.default_queue_name

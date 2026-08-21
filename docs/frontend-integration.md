@@ -451,6 +451,14 @@ async function uploadDocument(workspaceId: string, file: File) {
 
 tusd 也会通过 webhook 自动完成上传；前端主动调用 `complete-upload` 是兜底同步，接口是幂等的。
 
+
+反向代理部署时，tusd 的 `Location` 必须保持完整公开入口，例如
+`https://PUBLIC_IP/np-<prefix>/files/{upload_id}`。客户端必须使用 tus SDK 返回的
+`upload.url` 继续 `HEAD/PATCH`，不要自行去掉 HTTPS、随机前缀或改写成 `/files/{id}`。
+`POST` 创建成功但长期没有上传进度时，可先检查 tusd upload info：若
+`Size > 0` 且 `Offset = 0`，表示资源已创建但文件字节尚未上传；此时不要调用
+`complete-upload`，应让 tus SDK 重新上传或恢复该 URL。
+
 上传成功后，重新读取 document 详情或列表。`complete-upload` 返回最新 `Document`：显式学习类型在 `AUTO_LEARNING_PIPELINE=true` 时会自动排入处理队列；`chat_attachment` 和未自动处理的 `other` 通常直接为 `ready`。若客户端需要取得自动任务 ID，可在完成上传后立即调用一次 `process`，后端会复用同文档仍在 queued/running 的处理任务；已经 `ready` 的文档不要无条件再次调用，除非用户明确要求重处理。
 
 ## Documents
@@ -853,6 +861,7 @@ type LearningMetadata = {
   subject?: string;
   grade_level?: string;
   topic?: string;
+  auto_group_learning_unit?: boolean; // 默认 true
 };
 ```
 
@@ -870,9 +879,11 @@ complete-upload
 
 `build_knowledge_base` 与笔记生成是两个独立生命周期。300 秒仅表示最后一次知识更新后的最早启动时间，不表示笔记会在 300 秒内完成。OpenClaw skill 执行、schema 校验、HTML 清洗、SeaweedFS 写入以及最多 3 次任务重试都会继续占用时间。
 
+当学习单元包含图片类 note 时，笔记 worker 会把 OCR/知识库作为内容依据，并自动选择最新 8 张可用图片笔记作为视觉排版参考。图片仅帮助模型理解章节顺序、分栏、表格、知识框和强调方式；不会被嵌入最终 HTML，也不会覆盖 OCR 事实。模型不支持视觉输入时后端会自动降级到 OCR-only，前端无需增加参数或重试逻辑。可在 task events 中观察 study_note_visual_references_selected、study_note_visual_applied 或 study_note_visual_fallback；事件只包含文档 ID、数量、模型和脱敏原因。
+
 `other` 不会在上传完成后自动处理；用户显式调用 `process` 后，它会走与课件/笔记相同的知识库和笔记分支。`exam` 只执行 OCR 和题目提取，不会自动创建普通 Homework、知识库或电子笔记。`answer_key/rubric` 只执行 OCR，随后由 Homework references 使用。
 
-上传作业后，如果 metadata 带 `learning_unit_id`，后端会把作业挂到已有学习单元；否则会自动创建/归类学习单元：
+上传作业后，如果请求顶层带 `learning_unit_id`，后端会先按 `workspace_id + learning_unit_id` 校验并显式归组。未指定时会先按 `learning_unit_title/subject/grade_level/topic` 精确匹配；仍未匹配的资料在 OCR 后进入语义归组，只有相似度至少 `0.90` 且领先第二候选至少 `0.05` 才加入已有单元，否则创建新单元。`auto_group_learning_unit=false` 会跳过精确与语义归组并在 OCR 后创建新单元。Embedding 不可用会记录 warning 并创建新单元，不会阻断 OCR 主流程：
 
 ```text
 complete-upload
@@ -972,6 +983,7 @@ UI 建议：
 - notes API 返回 metadata 和短期签名 URL，不内联返回 HTML。展示时优先使用 `download_urls.rendered_html`；只有编辑器需要读取 fragment 时，才使用 `highlighted_html` 或 `html`。
 - `grade_homework` 成功后，刷新 mistakes、knowledge chunks 和 latest note。
 - `rendered_html` 会在服务端自动选择当前高亮或普通 fragment，并套用 `rendering.theme_id` 对应主题；签名过期后重新请求 notes/download-url。
+- 新生成的多模态 HTML 笔记通常使用 notepatch-paper-v2，历史笔记仍可能返回 v1。客户端不得硬编码主题 URL，也不要自行复刻分栏、卡片或高亮 CSS。
 - 修订接口只接受当前最新版本 ID；并发编辑过期时返回 `409`，前端应刷新后让用户重新确认。
 - HTML 必须按不可信内容处理；推荐受控富文本组件或 sandboxed WebView，不执行 script、事件属性或外部资源。
 - 手动编辑创建新版本；错题高亮只更新最新版本的 highlighted HTML artifact。没有笔记时评分不会创建高亮任务。
@@ -1149,11 +1161,24 @@ Content-Type: application/json
   "metadata": {},
   "created_by_user_id": "582d4cfc-57be-4fba-8370-d4283df4365c",
   "created_at": "2026-07-10T07:00:00Z",
-  "updated_at": "2026-07-10T07:12:00Z"
+  "updated_at": "2026-07-10T07:12:00Z",
+  "latest_grading_result": null
 }
 ```
 
 `description/document_id/due_at/rubric_text` 可能为 `null`。该接口是真正的部分更新：省略字段会保持原值；显式传 `rubric_text: null` 或空白字符串才会清除 rubric；空对象返回 `422`；`max_score` 必须大于 `0`。更新配置会取消尚未完成的评分 task，前端应重新触发评分。
+
+### Grading Results
+
+`GET /workspaces/{workspace_id}/homeworks` 和 `GET /workspaces/{workspace_id}/homeworks/{homework_id}` 都包含 `latest_grading_result`。未评分时为 `null`；评分成功后包含 `score/max_score/grading_mode/confidence/feedback/created_at`，前端应从这里显示最新分数，而不是只读取 Homework 自身的 `max_score`。
+
+完整评分历史：
+
+```http
+GET /workspaces/{workspace_id}/homeworks/{homework_id}/grading-results
+```
+
+返回按 `created_at` 倒序排列的 `GradingResultRead[]`。`grading_mode=provisional` 表示没有答案或 rubric 的诊断性评分；只有 `official` 才应显示为正式成绩。评分 task 成功后重新获取 Homework 详情或列表即可看到最新分数。
 
 ### Homework References
 
@@ -1261,11 +1286,44 @@ DELETE /workspaces/{workspace_id}/homeworks/{homework_id}/references/{reference_
 - `500/503`: 展示后端错误摘要；异步任务失败时同时读取 task events，OpenClaw/PaddleOCR/DocTr 失败通常不是前端渲染问题
 
 
+## Aggregated Workflow Tracking
+
+每次上传或手动重新处理都会产生一个 `WorkflowRun`。`upload-session` 返回顶层 `workflow_run_id`，Document 的 `latest_workflow_run_id` 指向最近一次运行。
+
+```ts
+type WorkflowRun = {
+  id: string;
+  workspace_id: string;
+  document_id: string | null;
+  learning_unit_id: string | null;
+  trigger_type: "upload" | "manual_reprocess" | string;
+  status: "waiting_upload" | "queued" | "running" | "waiting" | "succeeded" | "partially_succeeded" | "failed" | "cancelled";
+  core_status: "not_started" | "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+  enrichment_status: "not_started" | "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "not_applicable";
+  current_stage: string | null;
+  progress: number;
+  waiting_until: string | null;
+  error_message: string | null;
+};
+```
+
+```http
+GET /workspaces/{workspace_id}/workflows?page=1&page_size=50&status=waiting
+GET /workspaces/{workspace_id}/workflows/{workflow_run_id}
+GET /workspaces/{workspace_id}/workflows/{workflow_run_id}/events
+GET /workspaces/{workspace_id}/workflows/{workflow_run_id}/events/stream
+GET /workspaces/{workspace_id}/documents/{document_id}/workflow
+```
+
+详情响应为 `{ workflow, tasks }`，每个 task 项带 `stage/phase/required/task`。`core_status=succeeded` 表示 OCR、知识库或评分等核心结果已可用；增强流程失败时总状态是 `partially_succeeded`，不要把核心结果显示成整体失败。`waiting_until` 用于笔记 5 分钟防抖和 task 延迟重试。
+
+Workflow SSE 的事件名为 `workflow_event`，`data` 是完整 `WorkflowEvent`；使用 `sequence_no` 作为 `Last-Event-ID`。收到 `done` 后停止重连。鉴权、断线续传和 heartbeat 处理与 Task SSE 相同。
+
 ## Production Upload And Notes
 
 文件安全扫描默认关闭。tus 上传完成后，文档会返回 `scan_status=skipped`，并直接进入 `uploaded`、`processing` 或 `ready`；客户端不得把 `skipped` 显示为“正在安全检查”。只有后端显式启用 ClamAV 且文档 `status=scanning` 时才展示扫描进度，此时 `scan_status=clean` 表示扫描通过。
 
-未提供有效 `learning_unit_id` 时，每个上传文件会获得独立学习单元。合并学习单元使用：
+未提供 `learning_unit_id` 时，后端会按“唯一精确匹配 → OCR 后高置信语义匹配 → 新建单元”的顺序自动归组。显式但无效或跨 workspace 的 `learning_unit_id` 返回 `404`，不会静默新建。手工合并学习单元使用：
 
 ```http
 POST /workspaces/{workspace_id}/learning-units/{target_id}/merge

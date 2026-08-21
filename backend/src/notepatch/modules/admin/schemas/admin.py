@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
+from notepatch.modules.tasks.schemas.workflow import WorkflowRunRead
+
 
 class AdminUserRead(BaseModel):
     id: str
@@ -121,6 +123,10 @@ class AdminTaskDetailResponse(BaseModel):
     task: AdminTaskListItem
     payload: dict
     result: dict | None = None
+
+
+class AdminWorkflowListResponse(AdminPageMeta):
+    items: list[WorkflowRunRead]
 
 
 class AdminTaskEventRead(BaseModel):

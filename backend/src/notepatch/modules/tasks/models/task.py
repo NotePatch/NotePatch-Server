@@ -22,6 +22,7 @@ TASK_TYPES = {
     "purge_user",
     "scan_document",
     "merge_learning_units",
+    "assign_learning_unit",
 }
 TASK_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
 

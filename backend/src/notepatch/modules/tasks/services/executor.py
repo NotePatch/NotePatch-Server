@@ -20,6 +20,7 @@ from notepatch.modules.learning.services.merge import reconcile_learning_unit_me
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.registry import TaskExecutionContext, execute_registered_task
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.tasks.services.workflow import WorkflowTracker
 from notepatch.platform.database import utcnow
 from notepatch.platform.errors import RetryableTaskError, TaskCancelledError
 from notepatch.platform.gpu_lease import GpuLeaseService
@@ -90,6 +91,8 @@ def process_task(
         _handle_task_failure(db, task_id, learning, storage, exc)
     completed_task = db.get(Task, task_id)
     if completed_task is not None:
+        WorkflowTracker(db).reconcile_downstream(completed_task)
+        db.commit()
         reconcile_learning_unit_merge(db, completed_task)
         if completed_task.task_type == "openclaw_agent_run" and completed_task.status in {
             "succeeded",

@@ -1,9 +1,9 @@
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
-from notepatch.modules.learning.models.homework import Homework, HomeworkReference
+from notepatch.modules.learning.models.homework import GradingResult, Homework, HomeworkReference
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.tasks.services.task import TaskService
 
@@ -180,9 +180,22 @@ class HomeworkService:
             commit=False,
         )
 
+    def list_grading_results(self, workspace_id: str, homework_id: str) -> list[GradingResult]:
+        self.get_homework(workspace_id, homework_id)
+        return self.db.scalars(
+            select(GradingResult)
+            .where(
+                GradingResult.workspace_id == workspace_id,
+                GradingResult.homework_id == homework_id,
+            )
+            .order_by(GradingResult.created_at.desc())
+        ).all()
+
     def get_homework(self, workspace_id: str, homework_id: str) -> Homework:
         homework = self.db.scalar(
-            select(Homework).where(Homework.workspace_id == workspace_id, Homework.id == homework_id)
+            select(Homework)
+            .options(selectinload(Homework.grading_results))
+            .where(Homework.workspace_id == workspace_id, Homework.id == homework_id)
         )
         if homework is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Homework not found")

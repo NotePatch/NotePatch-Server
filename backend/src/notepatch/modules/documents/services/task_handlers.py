@@ -236,25 +236,27 @@ def _run_and_store_ocr(
             "object_key": source_artifact.object_key if source_artifact else document.object_key,
         },
     }
-    with gpu_lease.lease(
-        owner=f"task:{task.id}:ocr",
-        event_callback=lambda event, data: _gpu_event(db, tasks, task, event, data),
-    ):
-        result = pipeline.run(
-            input_path=input_path,
-            document_id=document.id,
-            workspace_id=task.workspace_id,
-            source=source,
-            mime_type=source_artifact.mime_type if source_artifact else document.mime_type,
-            file_type=(
-                "image" if source_artifact and source_artifact.artifact_type == "deskewed_image"
-                else "pdf" if source_artifact and source_artifact.artifact_type == "converted_pdf"
-                else document.file_type
-            ),
-            event_callback=ocr_event,
-        )
+    try:
+        with gpu_lease.lease(
+            owner=f"task:{task.id}:ocr",
+            event_callback=lambda event, data: _gpu_event(db, tasks, task, event, data),
+        ):
+            result = pipeline.run(
+                input_path=input_path,
+                document_id=document.id,
+                workspace_id=task.workspace_id,
+                source=source,
+                mime_type=source_artifact.mime_type if source_artifact else document.mime_type,
+                file_type=(
+                    "image" if source_artifact and source_artifact.artifact_type == "deskewed_image"
+                    else "pdf" if source_artifact and source_artifact.artifact_type == "converted_pdf"
+                    else document.file_type
+                ),
+                event_callback=ocr_event,
+            )
+    finally:
+        _release_paddle_gpu_cache()
     tasks.ensure_active(task)
-    _release_paddle_gpu_cache()
     output = pipeline.write_outputs(result, workdir / "ocr-output")
     run_id = str(uuid.uuid4())
     specs = {

@@ -9,6 +9,7 @@ from notepatch.platform.config import get_settings
 from notepatch.platform.database import get_db
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.tasks.models.task import Task, TaskEvent
+from notepatch.modules.tasks.models.workflow import WorkflowEvent, WorkflowRun, WorkflowTaskLink
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.identity.models.workspace import Workspace
 from notepatch.modules.learning.models.homework import Homework, Mistake
@@ -32,9 +33,17 @@ from notepatch.modules.admin.schemas.admin import (
     AdminUserListResponse,
     AdminUserRead,
     AdminWorkspaceRead,
+    AdminWorkflowListResponse,
 )
 from notepatch.platform.storage import StorageService
 from notepatch.modules.admin.services.health import queue_statuses, service_statuses
+from notepatch.modules.tasks.schemas.task import TaskRead
+from notepatch.modules.tasks.schemas.workflow import (
+    WorkflowDetailResponse,
+    WorkflowEventRead,
+    WorkflowRunRead,
+    WorkflowTaskRead,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -407,6 +416,82 @@ def get_artifact_download_url(
         expires_in=expires_seconds,
         download_url=storage.create_presigned_artifact_download_url(artifact.bucket, artifact.object_key, expires_seconds),
     )
+
+
+@router.get("/workflows", response_model=AdminWorkflowListResponse)
+def list_workflows(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    status_filter: str | None = Query(default=None, alias="status"),
+    workspace_id: str | None = None,
+    document_id: str | None = None,
+    learning_unit_id: str | None = None,
+    _admin: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+) -> AdminWorkflowListResponse:
+    query = select(WorkflowRun)
+    if status_filter:
+        query = query.where(WorkflowRun.status == status_filter)
+    if workspace_id:
+        query = query.where(WorkflowRun.workspace_id == workspace_id)
+    if document_id:
+        query = query.where(WorkflowRun.document_id == document_id)
+    if learning_unit_id:
+        query = query.where(WorkflowRun.learning_unit_id == learning_unit_id)
+    total = _total(db, query)
+    runs = db.scalars(
+        query.order_by(WorkflowRun.created_at.desc()).offset(_offset(page, page_size)).limit(page_size)
+    ).all()
+    return AdminWorkflowListResponse(
+        page=page,
+        page_size=page_size,
+        total=total,
+        items=[WorkflowRunRead.model_validate(run) for run in runs],
+    )
+
+
+@router.get("/workflows/{workflow_run_id}", response_model=WorkflowDetailResponse)
+def get_workflow_detail(
+    workflow_run_id: str,
+    _admin: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+) -> WorkflowDetailResponse:
+    run = db.get(WorkflowRun, workflow_run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    rows = db.execute(
+        select(WorkflowTaskLink, Task)
+        .join(Task, Task.id == WorkflowTaskLink.task_id)
+        .where(WorkflowTaskLink.workflow_run_id == run.id)
+        .order_by(WorkflowTaskLink.created_at.asc())
+    ).all()
+    return WorkflowDetailResponse(
+        workflow=WorkflowRunRead.model_validate(run),
+        tasks=[
+            WorkflowTaskRead(
+                stage=link.stage,
+                phase=link.phase,
+                required=link.required,
+                task=TaskRead.model_validate(task),
+            )
+            for link, task in rows
+        ],
+    )
+
+
+@router.get("/workflows/{workflow_run_id}/events", response_model=list[WorkflowEventRead])
+def get_admin_workflow_events(
+    workflow_run_id: str,
+    _admin: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+) -> list[WorkflowEvent]:
+    if db.get(WorkflowRun, workflow_run_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    return db.scalars(
+        select(WorkflowEvent)
+        .where(WorkflowEvent.workflow_run_id == workflow_run_id)
+        .order_by(WorkflowEvent.sequence_no.asc())
+    ).all()
 
 
 @router.get("/tasks", response_model=AdminTaskListResponse)

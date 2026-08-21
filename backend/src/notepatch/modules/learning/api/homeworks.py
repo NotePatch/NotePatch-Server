@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from notepatch.entrypoints.deps import get_current_user, get_task_service, get_workspace_member
 from notepatch.platform.database import get_db
@@ -13,6 +13,7 @@ from notepatch.modules.identity.models.workspace import WorkspaceMember
 from notepatch.modules.learning.schemas.homework import (
     GradeHomeworkRequest,
     GradingConfigUpdate,
+    GradingResultRead,
     HomeworkCreate,
     HomeworkRead,
     HomeworkReferenceCreate,
@@ -33,6 +34,7 @@ def list_homeworks(
 ) -> list[Homework]:
     return db.scalars(
         select(Homework)
+        .options(selectinload(Homework.grading_results))
         .outerjoin(Document, Document.id == Homework.document_id)
         .where(
             Homework.workspace_id == workspace_id,
@@ -72,6 +74,16 @@ def get_homework(
     db: Session = Depends(get_db),
 ) -> Homework:
     return HomeworkService(db).get_homework(workspace_id, homework_id)
+
+
+@router.get("/{homework_id}/grading-results", response_model=list[GradingResultRead])
+def list_grading_results(
+    workspace_id: str,
+    homework_id: str,
+    _member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+):
+    return HomeworkService(db).list_grading_results(workspace_id, homework_id)
 
 
 @router.patch("/{homework_id}/grading-config", response_model=HomeworkRead)

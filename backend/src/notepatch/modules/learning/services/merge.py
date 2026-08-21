@@ -4,6 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.documents.models.document import Document
+from notepatch.modules.learning.models.assignment import LearningUnitAssignment
 from notepatch.modules.learning.models.homework import Homework, Mistake
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import (
@@ -15,6 +16,7 @@ from notepatch.modules.learning.models.learning import (
     StudyNoteVersion,
 )
 from notepatch.modules.tasks.models.task import Task
+from notepatch.modules.tasks.models.workflow import WorkflowRun
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.platform.storage import StorageService
@@ -130,6 +132,28 @@ class LearningUnitMergeService:
                 metadata = dict(document.metadata_ or {})
                 metadata["learning_unit_id"] = target.id
                 document.metadata_ = metadata
+
+        assignments = self.db.scalars(
+            select(LearningUnitAssignment).where(
+                LearningUnitAssignment.workspace_id == task.workspace_id,
+                LearningUnitAssignment.learning_unit_id.in_(source_ids),
+            )
+        ).all()
+        for assignment in assignments:
+            evidence = dict(assignment.evidence or {})
+            evidence["merged_from_learning_unit_id"] = assignment.learning_unit_id
+            evidence["merge_task_id"] = task.id
+            assignment.learning_unit_id = target.id
+            assignment.status = "reassigned"
+            assignment.evidence = evidence
+        workflows = self.db.scalars(
+            select(WorkflowRun).where(
+                WorkflowRun.workspace_id == task.workspace_id,
+                WorkflowRun.learning_unit_id.in_(source_ids),
+            )
+        ).all()
+        for workflow in workflows:
+            workflow.learning_unit_id = target.id
 
         for source in sources:
             source.merged_into_id = target.id

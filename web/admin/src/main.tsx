@@ -16,6 +16,7 @@ import { HomeworkDetailPage, HomeworksPage, MistakesPage } from "./pages/Homewor
 import { ConversationsPage } from "./pages/Conversations";
 import { OperationsPage } from "./pages/Operations";
 import { KnowledgePage } from "./pages/Knowledge";
+import { WorkflowDetailPage, WorkflowsPage } from "./pages/Workflows";
 import "./styles.css";
 
 const ROUTER_BASE = window.location.pathname.match(/^\/np-[0-9a-f]{32}(?=\/|$)/i)?.[0] ?? "/";
@@ -63,6 +64,8 @@ function App() {
             <Route path="/homeworks/:homeworkId" element={<HomeworkDetailPage />} />
             <Route path="/mistakes" element={<MistakesPage />} />
             <Route path="/conversations" element={<ConversationsPage />} />
+            <Route path="/workflows" element={<WorkflowsPage />} />
+            <Route path="/workflows/:workflowId" element={<WorkflowDetailPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/tasks/:taskId" element={<TaskDetailPage />} />
             <Route path="/operations" element={<OperationsPage />} />

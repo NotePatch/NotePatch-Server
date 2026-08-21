@@ -8,8 +8,8 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
-from .config import MAX_UPLOAD_BYTES
-from .doctr import missing_weight_paths, rectify_document
+from .config import MAX_UPLOAD_BYTES, UNLOAD_MODELS_AFTER_REQUEST
+from .doctr import missing_weight_paths, rectify_document, release_models
 from .storage import detect_image_format, image_extension, write_bytes_atomic
 
 
@@ -49,7 +49,11 @@ async def rectify(file: UploadFile = File(...), ill_rec: bool = Form(True)) -> R
 
         try:
             with _INFERENCE_LOCK:
-                rectify_document(str(input_path), str(output_path), ill_rec=ill_rec)
+                try:
+                    rectify_document(str(input_path), str(output_path), ill_rec=ill_rec)
+                finally:
+                    if UNLOAD_MODELS_AFTER_REQUEST:
+                        release_models()
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

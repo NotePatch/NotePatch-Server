@@ -56,7 +56,16 @@ class FakeSkillRunner:
     def __init__(self, *args, **kwargs) -> None:
         pass
 
-    def execute(self, *, task, skill_name, input_payload, output_filename, schema):
+    def execute(
+        self,
+        *,
+        task,
+        skill_name,
+        input_payload,
+        output_filename,
+        schema,
+        visual_document_ids=None,
+    ):
         if schema is QuestionExtractionResult:
             payload = {
                 "questions": [
@@ -126,7 +135,11 @@ class FakeSkillRunner:
                             {
                                 "id": grading_points[0].get("id"),
                                 "name": "Linear functions",
-                            }
+                            },
+                            {
+                                "id": grading_points[0].get("id"),
+                                "name": "Linear functions",
+                            },
                         ],
                     }
                 ],
@@ -192,4 +205,9 @@ class FakeSkillRunner:
             "gateway_container": "test-gateway",
             "gateway_url": "http://test-gateway:18789",
             "run_result": {"runner": "test"},
+            "visual_reference": {
+                "document_ids": list(visual_document_ids or []),
+                "selection_policy": "latest_8_image_notes",
+                "mode": "multimodal" if visual_document_ids else "none",
+            },
         }

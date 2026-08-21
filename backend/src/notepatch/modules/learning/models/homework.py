@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from notepatch.platform.database import Base, utcnow
 
@@ -31,6 +31,14 @@ class Homework(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+    grading_results: Mapped[list["GradingResult"]] = relationship(
+        back_populates="homework",
+        order_by="GradingResult.created_at",
+    )
+
+    @property
+    def latest_grading_result(self) -> "GradingResult | None":
+        return self.grading_results[-1] if self.grading_results else None
 
 
 class Question(Base):
@@ -77,6 +85,7 @@ class GradingResult(Base):
     report_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    homework: Mapped[Homework] = relationship(back_populates="grading_results")
 
 
 class Mistake(Base):

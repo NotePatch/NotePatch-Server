@@ -75,6 +75,22 @@ def _latest_task(db, workspace_id: str, task_type: str, resource_id: str | None 
     return task
 
 
+def _process_assignment_if_present(db, workspace_id: str, document_id: str, storage) -> Task | None:
+    task = db.scalar(
+        select(Task)
+        .where(
+            Task.workspace_id == workspace_id,
+            Task.task_type == "assign_learning_unit",
+            Task.resource_id == document_id,
+            Task.status == "queued",
+        )
+        .order_by(Task.created_at.desc())
+    )
+    if task is not None:
+        process_task(db, task.id, storage=storage)
+    return task
+
+
 def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmaker, fake_storage, monkeypatch):
     settings, old_auto = _set_auto_learning(True)
     try:
@@ -93,6 +109,7 @@ def test_upload_to_ocr_to_knowledge_to_study_note_workflow(client, db_sessionmak
 
         with db_sessionmaker() as db:
             process_task(db, _latest_task(db, workspace_id, "document_processing_pipeline", document_id).id, storage=fake_storage, doctr_client=FailingDocTrClient())
+            _process_assignment_if_present(db, workspace_id, document_id, fake_storage)
             build_task = _latest_task(db, workspace_id, "build_knowledge_base", document_id)
             assert build_task.status == "queued"
 
@@ -209,6 +226,7 @@ def test_force_knowledge_reprocess_replaces_document_chunks(client, db_sessionma
                 storage=fake_storage,
                 doctr_client=FailingDocTrClient(),
             )
+            _process_assignment_if_present(db, workspace_id, document_id, fake_storage)
             first = _latest_task(db, workspace_id, "build_knowledge_base", document_id)
             process_task(db, first.id, storage=fake_storage)
             first_chunk_ids = set(
@@ -256,6 +274,7 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
         with db_sessionmaker() as db:
             courseware_document_id = courseware["document"]["id"]
             process_task(db, _latest_task(db, workspace_id, "document_processing_pipeline", courseware_document_id).id, storage=fake_storage, doctr_client=FailingDocTrClient())
+            _process_assignment_if_present(db, workspace_id, courseware_document_id, fake_storage)
             process_task(db, _latest_task(db, workspace_id, "build_knowledge_base", courseware_document_id).id, storage=fake_storage)
             learning_unit = db.scalar(select(LearningUnit).where(LearningUnit.workspace_id == workspace_id))
             assert learning_unit is not None
@@ -339,6 +358,7 @@ def test_learning_unit_api_is_workspace_scoped(client, db_sessionmaker, fake_sto
         )
         with db_sessionmaker() as db:
             process_task(db, _latest_task(db, alice_workspace_id, "document_processing_pipeline", upload["document"]["id"]).id, storage=fake_storage, doctr_client=FailingDocTrClient())
+            _process_assignment_if_present(db, alice_workspace_id, upload["document"]["id"], fake_storage)
             learning_unit = db.scalar(select(LearningUnit).where(LearningUnit.workspace_id == alice_workspace_id))
             assert learning_unit is not None
 
@@ -373,6 +393,7 @@ def test_grading_without_study_note_skips_highlight_task(client, db_sessionmaker
                 storage=fake_storage,
                 doctr_client=FailingDocTrClient(),
             )
+            _process_assignment_if_present(db, workspace_id, document_id, fake_storage)
             process_task(db, _latest_task(db, workspace_id, "extract_questions", document_id).id, storage=fake_storage)
             grade_task = _latest_task(db, workspace_id, "grade_homework")
             process_task(db, grade_task.id, storage=fake_storage)

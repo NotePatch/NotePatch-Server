@@ -37,7 +37,9 @@ def test_rectify_returns_png_without_auth(tmp_path, monkeypatch):
         assert ill_rec is False
         Path(output_path).write_bytes(tiny_png())
 
+    released = []
     monkeypatch.setattr(main, "rectify_document", fake_rectify)
+    monkeypatch.setattr(main, "release_models", lambda: released.append(True))
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -49,6 +51,7 @@ def test_rectify_returns_png_without_auth(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("image/png")
     assert response.content.startswith(b"\x89PNG")
+    assert released == [True]
 
 
 def test_rectify_rejects_empty_non_image_and_too_large(tmp_path, monkeypatch):

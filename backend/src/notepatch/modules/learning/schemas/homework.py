@@ -15,6 +15,20 @@ class HomeworkCreate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class GradingResultRead(ORMModel):
+    id: str
+    workspace_id: str
+    homework_id: str
+    question_id: str | None = None
+    student_user_id: str | None = None
+    score: float | None = None
+    max_score: float | None = None
+    grading_mode: str
+    confidence: float | None = None
+    feedback: str | None = None
+    created_at: datetime
+
+
 class HomeworkRead(ORMModel):
     id: str
     workspace_id: str
@@ -29,6 +43,7 @@ class HomeworkRead(ORMModel):
     created_by_user_id: str
     created_at: datetime
     updated_at: datetime
+    latest_grading_result: GradingResultRead | None = None
 
 
 class QuestionRead(ORMModel):

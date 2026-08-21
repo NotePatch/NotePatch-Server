@@ -16,6 +16,7 @@ def test_health_and_embedding_contract(monkeypatch):
         health = client.get("/healthz")
         response = client.post("/v1/embeddings", json={"input": ["algebra", "geometry"]})
     assert health.json()["ok"] is True
+    assert health.json()["device"] == main.state.device
     assert response.status_code == 200
     assert response.json()["dimension"] == 1024
     assert len(response.json()["embeddings"]) == 2

@@ -20,6 +20,7 @@ from notepatch.modules.learning.models.homework import GradingResult, Homework, 
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import LearningUnit, LearningUnitDocument, StudyNoteVersion
 from notepatch.modules.tasks.models.task import Task
+from notepatch.modules.learning.services.assignment import LearningUnitAssignmentService
 from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.platform.errors import PermanentTaskError
 from notepatch.modules.ai.services.skill_runner import OpenClawSkillRunner
@@ -67,45 +68,14 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
     def ensure_learning_unit_for_document(self, document: Document) -> LearningUnit:
         if document.document_kind == CHAT_ATTACHMENT_KIND:
             raise PermanentTaskError("Chat attachments cannot be added to learning units")
-        metadata = dict(document.metadata_ or {})
-        learning_unit_id = metadata.get("learning_unit_id")
-        if isinstance(learning_unit_id, str) and learning_unit_id:
-            learning_unit = self.db.scalar(
-                select(LearningUnit).where(
-                    LearningUnit.workspace_id == document.workspace_id,
-                    LearningUnit.id == learning_unit_id,
-                )
-            )
-            if learning_unit is not None:
-                self._link_document(learning_unit, document)
-                self.db.commit()
-                return learning_unit
-
-        subject = _string_or_none(metadata.get("subject"))
-        grade_level = _string_or_none(metadata.get("grade_level"))
-        topic = _string_or_none(metadata.get("topic"))
-        title = (
-            _string_or_none(metadata.get("learning_unit_title"))
-            or document.title
-            or document.original_filename
-            or "学习资料"
-        )
-        learning_unit = LearningUnit(
-            workspace_id=document.workspace_id,
-            title=title[:255],
-            subject=subject,
-            grade_level=grade_level,
-            topic=topic,
-            metadata_={"source": "automatic_pipeline", "source_document_id": document.id},
-        )
-        self.db.add(learning_unit)
-        self.db.flush()
-        metadata["learning_unit_id"] = learning_unit.id
-        document.metadata_ = metadata
-        self._link_document(learning_unit, document)
+        unit = LearningUnitAssignmentService(
+            self.db,
+            storage=self.storage,
+            embedding_client=self.embedding_client,
+        ).ensure_assigned(document)
         self.db.commit()
-        self.db.refresh(learning_unit)
-        return learning_unit
+        self.db.refresh(unit)
+        return unit
 
     def schedule_after_upload(self, document: Document) -> Task | None:
         if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
@@ -114,17 +84,27 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
             document.workspace_id, "document_processing_pipeline", document.id
         ):
             return None
-        learning_unit = self.ensure_learning_unit_for_document(document)
+        assignment_service = LearningUnitAssignmentService(
+            self.db,
+            storage=self.storage,
+            embedding_client=self.embedding_client,
+        )
+        unit = assignment_service.preassign(document)
+        self.db.commit()
+        payload = {
+            "document_id": document.id,
+            "options": {"auto_learning": True},
+        }
+        if unit is not None:
+            payload["learning_unit_id"] = unit.id
+        if document.latest_workflow_run_id:
+            payload["workflow_run_id"] = document.latest_workflow_run_id
         return TaskService(self.db).create_task(
             workspace_id=document.workspace_id,
             task_type="document_processing_pipeline",
             resource_type="document",
             resource_id=document.id,
-            payload={
-                "document_id": document.id,
-                "options": {"auto_learning": True},
-                "learning_unit_id": learning_unit.id,
-            },
+            payload=payload,
         )
 
     def schedule_after_ocr(
@@ -136,12 +116,42 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
     ) -> list[Task]:
         if document.document_kind == CHAT_ATTACHMENT_KIND:
             return []
-        learning_unit = self.ensure_learning_unit_for_document(document)
+        assignment_service = LearningUnitAssignmentService(
+            self.db,
+            storage=self.storage,
+            embedding_client=self.embedding_client,
+        )
+        unit = assignment_service.preassign(document)
         ocr_run_id = (ocr_artifacts.get("ocr_json").metadata_ or {}).get("ocr_run_id")
         common = {
             "document_id": document.id,
-            "learning_unit_id": learning_unit.id,
             "source_ocr_run_id": ocr_run_id,
+            "force_reprocess": force_reprocess,
+        }
+        if unit is None:
+            return self._create_unique_tasks(
+                [("assign_learning_unit", "document", document.id, common)],
+                force_reprocess=force_reprocess,
+            )
+        return self.schedule_after_assignment(
+            document=document,
+            learning_unit=unit,
+            source_ocr_run_id=ocr_run_id,
+            force_reprocess=force_reprocess,
+        )
+
+    def schedule_after_assignment(
+        self,
+        *,
+        document: Document,
+        learning_unit: LearningUnit,
+        source_ocr_run_id: str | None,
+        force_reprocess: bool,
+    ) -> list[Task]:
+        common = {
+            "document_id": document.id,
+            "learning_unit_id": learning_unit.id,
+            "source_ocr_run_id": source_ocr_run_id,
             "force_reprocess": force_reprocess,
         }
         specs: list[tuple[str, str, str, dict]] = []
@@ -149,7 +159,6 @@ class LearningWorkflowService(LearningContentOperations, LearningGradingOperatio
             specs.append(("build_knowledge_base", "document", document.id, common))
         elif document.document_kind in {"homework", "corrected_homework", "exam"}:
             specs.append(("extract_questions", "document", document.id, common))
-        # answer keys and rubrics are OCR sources consumed by grading; they do not trigger notes.
         return self._create_unique_tasks(specs, force_reprocess=force_reprocess)
 
     def ensure_homework_for_document(

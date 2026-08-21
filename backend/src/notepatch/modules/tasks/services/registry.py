@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.gateway import OpenClawRunner
 from notepatch.modules.admin.services.operations import UserPurgeExecutor
 from notepatch.modules.ai.services.task_handler import process_openclaw_chat
 from notepatch.modules.documents.ocr import OcrPipeline
+from notepatch.modules.documents.models.document import Document
 from notepatch.modules.documents.services.doctr import DocTrClient
 from notepatch.modules.documents.services.purge import DocumentPurgeService
 from notepatch.modules.documents.services.task_handlers import (
@@ -15,6 +17,7 @@ from notepatch.modules.documents.services.task_handlers import (
     process_ocr_document,
     process_scan_document,
 )
+from notepatch.modules.learning.services.assignment import LearningUnitAssignmentService
 from notepatch.modules.learning.services.embedding import EmbeddingClient
 from notepatch.modules.learning.services.task_handlers import run_learning_task
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
@@ -22,6 +25,7 @@ from notepatch.modules.learning.services.merge import LearningUnitMergeService
 from notepatch.modules.identity.services.profile import AvatarService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.modules.tasks.services.workflow import WorkflowTracker
 from notepatch.platform.errors import PermanentTaskError, RetryableTaskError
 from notepatch.platform.gpu_lease import GpuLeaseService
 from notepatch.platform.storage import StorageService
@@ -40,6 +44,7 @@ REGISTERED_TASK_TYPES = {
     "scan_document",
     "document_processing_pipeline",
     "ocr_document",
+    "assign_learning_unit",
     *LEARNING_TASK_TYPES,
     "merge_learning_units",
     "purge_document",
@@ -87,6 +92,59 @@ def execute_registered_task(context: TaskExecutionContext) -> None:
             context.ocr_pipeline,
             context.gpu_lease,
             context.learning,
+        )
+    elif task.task_type == "assign_learning_unit":
+        context.tasks.add_event(
+            task,
+            "learning_unit_assignment_started",
+            "Learning unit assignment started",
+            progress=75,
+        )
+        context.db.commit()
+        document = context.db.scalar(
+            select(Document).where(
+                Document.workspace_id == task.workspace_id,
+                Document.id == (task.payload.get("document_id") or task.resource_id),
+                Document.status != "deleted",
+            )
+        )
+        if document is None:
+            raise PermanentTaskError("Document not found")
+        unit, assignment, warning = LearningUnitAssignmentService(
+            context.db,
+            storage=context.storage,
+            embedding_client=context.embedding_client,
+        ).assign_after_ocr(document)
+        context.db.commit()
+        for run in WorkflowTracker(context.db).runs_for_task(task.id):
+            run.learning_unit_id = unit.id
+        if warning:
+            context.tasks.add_event(
+                task,
+                "learning_unit_assignment_warning",
+                "Semantic grouping was unavailable; a new learning unit was created",
+                level="warning",
+                data={"reason": warning},
+            )
+            context.db.commit()
+        downstream = context.learning.schedule_after_assignment(
+            document=document,
+            learning_unit=unit,
+            source_ocr_run_id=task.payload.get("source_ocr_run_id"),
+            force_reprocess=bool(task.payload.get("force_reprocess")),
+        )
+        context.tasks.mark_succeeded(
+            task,
+            {
+                "document_id": document.id,
+                "learning_unit_id": unit.id,
+                "assignment_id": assignment.id,
+                "method": assignment.method,
+                "confidence": assignment.confidence,
+                "downstream_tasks": [
+                    {"id": child.id, "task_type": child.task_type} for child in downstream
+                ],
+            },
         )
     elif task.task_type in LEARNING_TASK_TYPES:
         run_learning_task(context.tasks, task, context.learning, context.storage)

@@ -56,6 +56,33 @@ def test_public_path_prefix_validates_and_builds_note_urls():
         Settings(_env_file=None, public_path_prefix="/predictable")
 
 
+def test_deployment_schema_revision_matches_alembic_head():
+    repo_root = Path(__file__).resolve().parents[2]
+    expected = Settings(_env_file=None).schema_revision
+    assert expected == "202608210001"
+    assert f"SCHEMA_REVISION: {expected}" in (repo_root / "compose.yml").read_text()
+    for dockerfile in (
+        repo_root / "infra/docker/backend.Dockerfile",
+        repo_root / "infra/docker/ocr-worker.Dockerfile",
+    ):
+        assert f"ARG SCHEMA_REVISION={expected}" in dockerfile.read_text()
+    assert (repo_root / "backend/migrations/versions" / f"{expected}_workflow_and_unit_assignment.py").is_file()
+
+
+def test_public_gateway_preserves_external_tus_location():
+    repo_root = Path(__file__).resolve().parents[2]
+    compose = (repo_root / "compose.yml").read_text()
+    nginx_template = (repo_root / "infra/proxy/notepatch-nginx-tls.conf.template").read_text()
+
+    assert "- -behind-proxy" in compose
+    assert "proxy_set_header X-Forwarded-Proto https;" in nginx_template
+    assert "proxy_set_header X-Forwarded-Host $http_host;" in nginx_template
+    assert (
+        "proxy_redirect ~^https?://[^/]+/files/(.*)$ "
+        "https://__PUBLIC_IP____PUBLIC_PATH_PREFIX__/files/$1;"
+    ) in nginx_template
+
+
 def test_versioned_note_theme_is_public_and_immutable(client):
     response = client.get("/api/v1/assets/note-themes/notepatch-paper-v1.css")
     assert response.status_code == 200
@@ -306,7 +333,13 @@ def test_task_event_stream_resumes_and_closes_on_terminal(client, db_sessionmake
 
 
 def test_unassigned_uploads_create_distinct_learning_units(client, db_sessionmaker, fake_storage):
-    from tests.test_learning_workflow import _create_and_complete_document
+    from notepatch.modules.tasks.services.executor import process_task
+    from tests.test_doctr_worker import FailingDocTrClient
+    from tests.test_learning_workflow import (
+        _create_and_complete_document,
+        _latest_task,
+        _process_assignment_if_present,
+    )
 
     settings = get_settings()
     old_auto = settings.auto_learning_pipeline
@@ -314,8 +347,9 @@ def test_unassigned_uploads_create_distinct_learning_units(client, db_sessionmak
     try:
         user = register_user(client, "separate-units@example.com")
         workspace_id = first_workspace_id(client, user["access_token"])
+        document_ids = []
         for filename in ("chapter-one.png", "chapter-two.png"):
-            _create_and_complete_document(
+            upload = _create_and_complete_document(
                 client,
                 fake_storage,
                 user["access_token"],
@@ -323,7 +357,17 @@ def test_unassigned_uploads_create_distinct_learning_units(client, db_sessionmak
                 filename=filename,
                 document_kind="courseware",
             )
+            document_ids.append(upload["document"]["id"])
         with db_sessionmaker() as db:
+            assert db.scalars(select(LearningUnit).where(LearningUnit.workspace_id == workspace_id)).all() == []
+            for document_id in document_ids:
+                process_task(
+                    db,
+                    _latest_task(db, workspace_id, "document_processing_pipeline", document_id).id,
+                    storage=fake_storage,
+                    doctr_client=FailingDocTrClient(),
+                )
+                _process_assignment_if_present(db, workspace_id, document_id, fake_storage)
             units = db.scalars(
                 select(LearningUnit).where(LearningUnit.workspace_id == workspace_id)
             ).all()

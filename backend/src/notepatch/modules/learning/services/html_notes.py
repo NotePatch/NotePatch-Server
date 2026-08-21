@@ -52,6 +52,12 @@ ALLOWED_CLASSES = {
     "np-highlight--red",
     "np-highlight--yellow",
     "np-reinforcement",
+    "np-layout-grid",
+    "np-layout-two-column",
+    "np-stack",
+    "np-section-card",
+    "np-keyword",
+    "np-divider",
 }
 KNOWLEDGE_POINT_ATTRIBUTE = re.compile(r'data-knowledge-point-id="([^"]+)"')
 

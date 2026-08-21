@@ -117,6 +117,7 @@ class LearningGradingOperations:
 
         questions_by_sequence = {question.sequence_no: question for question in questions}
         attempts_created = 0
+        attempt_keys: set[tuple[str | None, str]] = set()
         for question_result in result.per_question:
             ratio = min(max(question_result.score / question_result.max_score, 0.0), 1.0)
             outcome = "correct" if ratio >= 0.999 else "incorrect" if ratio <= 0.001 else "partial"
@@ -125,6 +126,10 @@ class LearningGradingOperations:
                 point = resolved_point(reference)
                 if point is None or unit is None:
                     continue
+                attempt_key = (question.id if question else None, point.id)
+                if attempt_key in attempt_keys:
+                    continue
+                attempt_keys.add(attempt_key)
                 self.db.add(
                     KnowledgePointAttempt(
                         workspace_id=task.workspace_id,
@@ -201,6 +206,7 @@ class LearningGradingOperations:
         homework.status = "graded"
         self.db.commit()
         highlight_status = "not_applicable"
+        highlight_tasks = []
         latest_note = None
         if unit is not None:
             latest_note = self.db.scalar(
@@ -213,7 +219,7 @@ class LearningGradingOperations:
             )
         if unit is not None and latest_note is not None:
             self._ensure_active(task)
-            self._create_unique_tasks(
+            highlight_tasks = self._create_unique_tasks(
                 [
                     (
                         "highlight_study_notes",
@@ -253,6 +259,10 @@ class LearningGradingOperations:
             "attempts_created": attempts_created,
             "attempt_revision": unit.attempt_revision if unit else None,
             "flashcard_task_id": flashcard_task.id if flashcard_task else None,
+            "downstream_tasks": [
+                {"id": child.id, "task_type": child.task_type}
+                for child in [*highlight_tasks, *([flashcard_task] if flashcard_task else [])]
+            ],
         }
 
     def _increment_attempt_revision(self, unit: LearningUnit) -> LearningUnit:

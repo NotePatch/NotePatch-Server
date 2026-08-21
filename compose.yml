@@ -8,7 +8,7 @@ x-backend: &backend
     args:
       RELEASE_REVISION: ${GIT_SHA:-dev}
       RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
-      SCHEMA_REVISION: 202608200001
+      SCHEMA_REVISION: 202608210001
   env_file:
     - path: .env
       required: false
@@ -131,6 +131,7 @@ services:
       WORKER_QUEUES: ${OCR_WORKER_QUEUES:-ocr}
       OCR_ENGINE: paddleocr
       PADDLEOCR_USE_GPU: "true"
+      FLAGS_allocator_strategy: auto_growth
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     gpus: all
@@ -183,6 +184,7 @@ services:
       DOCSERVER_BASE_DIR: /opt/notepatch/services/doctr
       DOCSERVER_ILL_BATCH_SIZE: "64"
       DOCSERVER_PNG_COMPRESS_LEVEL: "1"
+      DOCSERVER_UNLOAD_MODELS_AFTER_REQUEST: ${DOCSERVER_UNLOAD_MODELS_AFTER_REQUEST:-true}
       DOCTR_ROOT: /opt/notepatch/services/doctr/vendor/DocTr
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -204,13 +206,14 @@ services:
     gpus: all
     environment:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_HOME: /models/huggingface
     volumes:
       - bge-cache:/models/huggingface
     healthcheck:
-      test: ["CMD", "python", "-c", "import torch, urllib.request; assert torch.cuda.is_available() and torch.cuda.device_count() > 0; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      test: ["CMD", "python", "-c", "import json, urllib.request; data=json.load(urllib.request.urlopen('http://localhost:8000/healthz')); assert data.get('ok') is True"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -277,7 +280,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       RESTIC_REPOSITORY: /backups/restic
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
-      SCHEMA_REVISION: 202608200001
+      SCHEMA_REVISION: 202608210001
       RELEASE_REVISION: ${GIT_SHA:-dev}
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups
@@ -388,6 +391,7 @@ services:
       - -host=0.0.0.0
       - -port=1080
       - -base-path=/files/
+      - -behind-proxy
       - -upload-dir=/data
       - -disable-download
       - -max-size=${UPLOAD_MAX_BYTES:-209715200}

@@ -21,6 +21,7 @@ class EmbeddingResponse(BaseModel):
 class ModelState:
     def __init__(self) -> None:
         self.model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+        self.device = os.getenv("EMBEDDING_DEVICE", "cpu").strip().lower() or "cpu"
         self.model = None
         self.error: str | None = None
         self.lock = threading.Lock()
@@ -29,7 +30,11 @@ class ModelState:
         try:
             from FlagEmbedding import BGEM3FlagModel
 
-            self.model = BGEM3FlagModel(self.model_name, use_fp16=True)
+            self.model = BGEM3FlagModel(
+                self.model_name,
+                use_fp16=self.device.startswith("cuda"),
+                devices=[self.device],
+            )
         except Exception as exc:
             self.error = str(exc)
             raise
@@ -52,6 +57,7 @@ def health() -> dict:
     return {
         "ok": state.model is not None,
         "model": state.model_name,
+        "device": state.device,
         "dimension": 1024,
         "error": state.error,
     }
