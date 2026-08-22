@@ -58,6 +58,7 @@ class OpenClawRunner(ABC):
         original_filename: str,
         runtime: dict,
         provider_model: str,
+        output_language: str,
         max_length: int,
         timeout_seconds: float,
     ) -> str | None:
@@ -285,13 +286,24 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         original_filename: str,
         runtime: dict,
         provider_model: str,
+        output_language: str,
         max_length: int,
         timeout_seconds: float,
     ) -> str | None:
+        language_instruction = {
+            "zh-CN": "Write the label in Simplified Chinese.",
+            "en-US": "Write the label in English.",
+            "pt-BR": "Write the label in Brazilian Portuguese.",
+            "ocr": "Use the dominant language of the OCR text.",
+        }.get(output_language, f"Write the label in the user-selected language {output_language}.")
         instruction = (
-            "Write a concise user-facing remark for an uploaded image using only its OCR text. "
-            "Summarize the recognizable subject or topic; do not describe visual details that OCR cannot prove. "
-            "Use the dominant language of the OCR text. Do not repeat the upload filename, infer private identity, "
+            "Create a very short library label for an uploaded image using only its OCR text. "
+            "This is a label, not a sentence or summary. Name only the single central topic; do not enumerate "
+            "subtopics or describe visual details that OCR cannot prove. Use 2-4 words for space-separated "
+            "languages; for scripts normally written without spaces, use an equivalently short label. "
+            "Avoid conjunction-heavy lists and filler words such as notes, overview, summary, content, "
+            "notas, resumo, conteúdo, 笔记, 概述, 总结, or 内容. "
+            f"{language_instruction} Do not repeat the upload filename, infer private identity, "
             "or foreground school, company, manufacturer, or notebook branding unless it is the actual subject. "
             f"Use at most {max_length} characters. Return only the remark without quotes, "
             "Markdown, prefixes, explanations, or terminal punctuation."

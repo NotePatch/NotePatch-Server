@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner
-from notepatch.modules.ai.services.image_naming import process_image_remark, schedule_image_remark
+from notepatch.modules.ai.services.image_naming import (
+    normalize_image_remark,
+    process_image_remark,
+    resolve_image_remark_language,
+    schedule_image_remark,
+)
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.tasks.models.task import Task, TaskEvent
 from notepatch.modules.tasks.services.task import TaskService
@@ -95,12 +100,14 @@ def test_image_upload_queues_ocr_before_ai_remark(client, db_sessionmaker, fake_
             "file_size": len(PNG_BYTES),
             "document_kind": "chat_attachment",
             "save_to_documents": False,
+            "client_locale": "pt-BR",
         },
     )
     assert upload.status_code == 201, upload.text
     payload = upload.json()
     assert payload["document"]["remark"] == "IMG_0250.png"
     assert payload["document"]["remark_source"] == "original_filename"
+    assert payload["document"]["metadata"]["image_remark_generation"]["client_locale"] == "pt-BR"
     fake_storage.objects[(payload["bucket"], payload["object_key"])] = {
         "file_size": len(PNG_BYTES), "mime_type": "image/png", "metadata": {}, "body": PNG_BYTES,
     }
@@ -231,6 +238,7 @@ def test_ai_remark_uses_ocr_text_and_never_changes_original_filename(
         assert document.remark_source == "ai_ocr"
         assert runner.calls[0]["ocr_text"] == "大肠的结构与消化系统复习笔记"
         assert runner.calls[0]["provider_model"] == "openai/gpt-5.6-luna"
+        assert runner.calls[0]["output_language"] == "ocr"
         assert task.result["source_variant"] == "ocr_text"
 
 
@@ -298,7 +306,8 @@ def test_gateway_remark_uses_ocr_text_fixed_model_and_minimal_reasoning(monkeypa
         original_filename="IMG_0250.jpg",
         runtime={"gateway_url": "http://gateway:18789", "gateway_token": "secret"},
         provider_model="openai/gpt-5.6-luna",
-        max_length=60,
+        output_language="en-US",
+        max_length=24,
         timeout_seconds=12,
     )
     assert result == "CPU 与寄存器课堂笔记"
@@ -308,4 +317,32 @@ def test_gateway_remark_uses_ocr_text_fixed_model_and_minimal_reasoning(monkeypa
     assert captured["headers"]["x-openclaw-model"] == "openai/gpt-5.6-luna"
     content = captured["json"]["messages"][1]["content"]
     assert "CPU 由运算器" in content
+    assert "2-4 words" in content
+    assert "single central topic" in content
+    assert "at most 24 characters" in content
+    assert "Write the label in English" in content
     assert "image_url" not in str(captured["json"])
+
+
+def test_image_remark_normalization_keeps_only_a_short_topic_label():
+    assert normalize_image_remark(
+        "CPU registers, accumulator, and system buses",
+        max_length=24,
+    ) == "CPU registers"
+    assert normalize_image_remark("CPU指令与性能指标概述", max_length=24) == "CPU指令与性能指标"
+    assert normalize_image_remark("主题：消化系统复习笔记。", max_length=24) == "消化系统"
+
+
+def test_image_remark_language_prefers_user_selection_then_client_locale():
+    assert resolve_image_remark_language(
+        {"ai_preferences": {"answers": {"response_language": "en-US"}}, "client_locale": "pt-BR"}
+    ) == "en-US"
+    assert resolve_image_remark_language(
+        {"ai_preferences": {"answers": {"response_language": "client_locale"}}, "client_locale": "pt-br"}
+    ) == "pt-BR"
+    assert resolve_image_remark_language(
+        {"ai_preferences": {"answers": {"response_language": "client_locale"}}}
+    ) == "ocr"
+    assert resolve_image_remark_language(
+        {"ai_preferences": {"answers": {"response_language": "match_user"}}, "client_locale": "en-US"}
+    ) == "ocr"

@@ -141,7 +141,7 @@ AI_CHAT_TITLE_MAX_LENGTH=40
 AI_CHAT_TITLE_TIMEOUT_SECONDS=30
 AI_IMAGE_REMARK_ENABLED=true
 AI_IMAGE_REMARK_MODEL=openai/gpt-5.6-luna
-AI_IMAGE_REMARK_MAX_LENGTH=60
+AI_IMAGE_REMARK_MAX_LENGTH=24
 AI_IMAGE_REMARK_TIMEOUT_SECONDS=60
 
 OpenClaw Gateway 的 sandbox 会通过宿主 Docker daemon 创建隔离容器，因此 Gateway 镜像必须同时包含 Docker CLI。统一使用仓库脚本构建，避免出现 Gateway HTTP 200 但 SSE 无回答：
@@ -395,7 +395,7 @@ curl -s http://localhost:8001/api/v1/workspaces/$WORKSPACE_ID/documents/complete
 
 如果 tusd 文件尚未完成，会返回 `409 Upload not finished`。
 
-图片备注与 `original_filename`、`title` 相互独立。用户偏好 `auto_image_remark_enabled=true` 且 upload-session 未提交 `remark` 时，后端先完成真实 OCR，再创建 AI queue 中的 `generate_image_remark` 任务。任务固定使用 `AI_IMAGE_REMARK_MODEL`（默认 `openai/gpt-5.6-luna`）与 `minimal` 思考强度，只把 `ocr_text` 发给模型，不发送原图或 DocTr 图片。OCR 无文本、开关关闭或全局功能关闭时，`remark` 使用原文件名。显式上传备注或随后通过 `PATCH /workspaces/{workspace_id}/documents/{document_id}` 编辑的备注始终优先，晚到的 AI 结果不得覆盖。旧 `ai_image_*` 响应字段仅作为兼容别名；新客户端使用 `remark/remark_source/image_remark_status/image_remark_task_id`。
+图片备注与 `original_filename`、`title` 相互独立。用户偏好 `auto_image_remark_enabled=true` 且 upload-session 未提交 `remark` 时，后端先完成真实 OCR，再创建 AI queue 中的 `generate_image_remark` 任务。任务固定使用 `AI_IMAGE_REMARK_MODEL`（默认 `openai/gpt-5.6-luna`）与 `minimal` 思考强度，只把 `ocr_text` 发给模型，不发送原图或 DocTr 图片。AI 返回的是约 2–4 个词的短资料标签而不是摘要，默认硬上限 24 字符。语言优先遵守用户 `response_language`；`match_user` 才跟随 OCR，`client_locale` 使用 upload-session 的可选 BCP 47 `client_locale`，缺失时跟随 OCR而不是默认中文。OCR 无文本、开关关闭或全局功能关闭时，`remark` 使用原文件名。显式上传备注或随后通过 `PATCH /workspaces/{workspace_id}/documents/{document_id}` 编辑的备注始终优先，晚到的 AI 结果不得覆盖。旧 `ai_image_*` 响应字段仅作为兼容别名；新客户端使用 `remark/remark_source/image_remark_status/image_remark_task_id`。
 
 
 公网反向代理必须让 tusd 返回的 `Location` 保留 HTTPS 与随机公开前缀：

@@ -85,6 +85,7 @@ def create_upload_session(
             **({"subject": payload.subject} if payload.subject else {}),
             **({"grade_level": payload.grade_level} if payload.grade_level else {}),
             **({"topic": payload.topic} if payload.topic else {}),
+            **({"client_locale": payload.client_locale} if payload.client_locale else {}),
             "auto_group_learning_unit": payload.auto_group_learning_unit,
             **({"note_content_edit_level": payload.note_content_edit_level} if payload.note_content_edit_level else {}),
             **({"note_layout_edit_level": payload.note_layout_edit_level} if payload.note_layout_edit_level else {}),

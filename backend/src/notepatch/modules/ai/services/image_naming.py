@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.gateway import OpenClawRunner
+from notepatch.modules.ai.services.locale import normalize_client_locale
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
 from notepatch.modules.identity.models.user import User
@@ -65,6 +66,11 @@ def schedule_image_remark(
             "ocr_run_id": (ocr_text_artifact.metadata_ or {}).get("ocr_run_id"),
             "ai_model": settings.ai_image_remark_model,
             "thinking_effort": "minimal",
+            **(
+                {"client_locale": client_locale}
+                if (client_locale := normalize_client_locale(_remark_state(document).get("client_locale")))
+                else {}
+            ),
         },
     )
     _update_remark_state(
@@ -160,6 +166,12 @@ def process_image_remark(
         raise PermanentTaskError("OCR text artifact for image remark is unavailable")
 
     model = str(task.payload.get("ai_model") or settings.ai_image_remark_model)
+    language_payload = dict(task.payload or {})
+    if "client_locale" not in language_payload:
+        client_locale = normalize_client_locale(_remark_state(document).get("client_locale"))
+        if client_locale:
+            language_payload["client_locale"] = client_locale
+    output_language = resolve_image_remark_language(language_payload)
     _update_remark_state(document, status="running", task_id=task.id, model=model, error=None)
     tasks.add_event(
         task,
@@ -171,6 +183,7 @@ def process_image_remark(
             "ocr_text_artifact_id": artifact.id,
             "provider_model": model,
             "thinking_effort": "minimal",
+            "output_language": output_language,
         },
     )
     db.commit()
@@ -214,6 +227,7 @@ def process_image_remark(
         original_filename=document.original_filename,
         runtime=runtime,
         provider_model=model,
+        output_language=output_language,
         max_length=settings.ai_image_remark_max_length,
         timeout_seconds=settings.ai_image_remark_timeout_seconds,
     )
@@ -257,6 +271,7 @@ def process_image_remark(
             "remark": remark,
             "provider_model": model,
             "thinking_effort": "minimal",
+            "output_language": output_language,
             "source_variant": "ocr_text",
             "ocr_text_artifact_id": artifact.id,
         },
@@ -270,6 +285,7 @@ def process_image_remark(
             "provider_model": model,
             "gateway_model": settings.openclaw_gateway_model,
             "thinking_effort": "minimal",
+            "output_language": output_language,
             "source_variant": "ocr_text",
             "ocr_text_artifact_id": artifact.id,
         },
@@ -301,8 +317,49 @@ def normalize_image_remark(value: object, *, max_length: int) -> str | None:
     first_line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     normalized = re.sub(r"^[#>*\-\s]+", "", first_line)
     normalized = normalized.strip().strip(chr(96) + chr(39) + chr(34))
-    normalized = re.sub(r"\s+", " ", normalized).rstrip(".!?;:")
-    return normalized[:max_length].rstrip() or None
+    normalized = re.sub(r"\s+", " ", normalized).rstrip(".!?;:。！？；：")
+    normalized = re.sub(
+        r"^(?:备注|主题|标签|remark|subject|label)\s*[:：]\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"(?:课堂|学习|复习)?(?:笔记|内容|概述|总结)$", "", normalized).strip()
+    normalized = re.sub(
+        r"\s+(?:(?:class|study|review)\s+)?(?:notes?|overview|summary|content)$",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    ascii_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+#.-]*", normalized)
+    if len(normalized) > max_length or len(ascii_words) > 4:
+        first_topic = re.split(r"[,，;；、|]|\s+(?:and|with|&)\s+", normalized, maxsplit=1, flags=re.IGNORECASE)[0]
+        if first_topic.strip():
+            normalized = first_topic.strip()
+
+    words = normalized.split()
+    if len(words) > 4:
+        normalized = " ".join(words[:4])
+    if len(normalized) > max_length:
+        shortened = normalized[:max_length].rstrip()
+        if " " in shortened and max_length < len(normalized) and normalized[max_length] != " ":
+            shortened = shortened.rsplit(" ", 1)[0]
+        normalized = shortened.rstrip(" ,，、;；.!?：:")
+    return normalized or None
+
+
+def resolve_image_remark_language(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "ocr"
+    snapshot = payload.get("ai_preferences")
+    answers = snapshot.get("answers") if isinstance(snapshot, dict) else None
+    preference = answers.get("response_language") if isinstance(answers, dict) else None
+    if preference in {"zh-CN", "en-US", "pt-BR"}:
+        return preference
+    if preference == "client_locale":
+        return normalize_client_locale(payload.get("client_locale")) or "ocr"
+    return "ocr"
 
 
 def _remark_state(document: Document) -> dict:
@@ -334,6 +391,7 @@ __all__ = [
     "mark_image_remark_failure",
     "normalize_image_remark",
     "process_image_remark",
+    "resolve_image_remark_language",
     "schedule_image_remark",
     "schedule_image_remark_ocr",
 ]

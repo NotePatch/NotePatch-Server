@@ -416,6 +416,7 @@ async function createUploadSession(
   documentKind = "other",
   saveToDocuments = true,
   remark?: string,
+  clientLocale?: string,
 ) {
   return apiFetch<UploadSessionResponse>(`/workspaces/${workspaceId}/documents/upload-session`, {
     method: "POST",
@@ -427,6 +428,7 @@ async function createUploadSession(
       save_to_documents: saveToDocuments,
       title: file.name,
       ...(remark ? { remark } : {}),
+      ...(clientLocale ? { client_locale: clientLocale } : {}),
       metadata: {},
     }),
   });
@@ -491,7 +493,9 @@ tusd 也会通过 webhook 自动完成上传；前端主动调用 `complete-uplo
 
 上传成功后，重新读取 document 详情或列表。`complete-upload` 返回最新 `Document`：显式学习类型在 `AUTO_LEARNING_PIPELINE=true` 时会自动排入处理队列；`chat_attachment` 和未自动处理的 `other` 通常直接为 `ready`。若客户端需要取得自动任务 ID，可在完成上传后立即调用一次 `process`，后端会复用同文档仍在 queued/running 的处理任务；已经 `ready` 的文档不要无条件再次调用，除非用户明确要求重处理。
 
-图片备注遵循固定优先级：upload-session 显式 `remark` > 用户后续编辑 > OCR 后 AI 自动备注 > 原文件名。用户全局开关由 `PATCH /auth/preferences` 的 `auto_image_remark_enabled` 控制，默认开启；关闭后新上传且未填写备注的文件直接使用 `original_filename`。开启时后端先完成 OCR，再创建 `generate_image_remark` AI 任务，固定使用 `openai/gpt-5.6-luna` 与 `minimal` 思考强度，只发送 OCR 文本，不发送原图或 DocTr 图片。OCR 为空时也回退原文件名。
+图片备注遵循固定优先级：upload-session 显式 `remark` > 用户后续编辑 > OCR 后 AI 自动备注 > 原文件名。用户全局开关由 `PATCH /auth/preferences` 的 `auto_image_remark_enabled` 控制，默认开启；关闭后新上传且未填写备注的文件直接使用 `original_filename`。开启时后端先完成 OCR，再创建 `generate_image_remark` AI 任务，固定使用 `openai/gpt-5.6-luna` 与 `minimal` 思考强度，只发送 OCR 文本，不发送原图或 DocTr 图片。自动结果是 2–4 个词左右的短资料标签而不是摘要，默认最多 24 字符。OCR 为空时也回退原文件名。
+
+备注语言优先遵守用户 AI 设置中的 `response_language`：固定 `zh-CN/en-US/pt-BR` 时严格使用所选语言；`match_user` 时跟随 OCR 内容；`client_locale` 时使用本次 upload-session 的 `client_locale`。App 应把当前语言的 BCP 47 tag（例如 `en-US`、`pt-BR`）随上传请求发送。若设置为 `client_locale` 但请求没有提供 locale，后端跟随 OCR，不会默认切换成中文。
 
 客户端优先展示 `document.remark ?? document.original_filename`，原始文件名始终读取 `document.original_filename`。自动生成期间可以立即展示当前 `remark`（初始值为原文件名），根据 `image_remark_status` 显示非阻塞状态，并通过 `image_remark_task_id` 轮询 task/events。旧 `ai_image_name/ai_image_naming_*` 仅为旧版本兼容字段，新客户端不要读取。
 

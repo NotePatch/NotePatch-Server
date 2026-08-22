@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     ai_chat_title_timeout_seconds: float = 30
     ai_image_remark_enabled: bool = True
     ai_image_remark_model: str = "openai/gpt-5.6-luna"
-    ai_image_remark_max_length: int = 60
+    ai_image_remark_max_length: int = 24
     ai_image_remark_timeout_seconds: float = 60
     ai_chat_stream_flush_milliseconds: int = 250
     ai_chat_stream_chunk_max_chars: int = 1024

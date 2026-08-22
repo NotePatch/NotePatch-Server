@@ -138,6 +138,11 @@ class UploadService:
         document_metadata["image_remark_generation"] = {
             "status": "waiting_upload" if auto_remark else "user" if user_remark else "disabled",
             **({"model": self.settings.ai_image_remark_model} if auto_remark else {}),
+            **(
+                {"client_locale": document_metadata["client_locale"]}
+                if auto_remark and isinstance(document_metadata.get("client_locale"), str)
+                else {}
+            ),
         }
         document = Document(
             id=document_id,
