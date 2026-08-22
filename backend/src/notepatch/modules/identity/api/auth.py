@@ -305,7 +305,7 @@ def update_preferences(
             current_user.ai_preferences = AiPreferences.model_validate(merged).model_dump()
             changed_ai_fields = sorted(patch_values)
     if not updates and not changed_ai_fields:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one preference is required")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="At least one preference is required")
     for field, value in updates.items():
         setattr(current_user, field, value)
     if changed_ai_fields:

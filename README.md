@@ -35,6 +35,8 @@ scripts/                  运维、迁移与清理工具
 
 Python 包只有 `notepatch`、`doctr_service`、`embedding_service` 三个名称。运行数据不进仓库，统一位于 `${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}`。
 
+第三方许可证见 `services/doctr/THIRD_PARTY.md`。特别注意：vendored DocTr 当前许可证仅允许非商业使用；商业部署前必须取得上游作者的书面许可。NotePatch 仓库自身的发布许可证需由仓库所有者另行确定。
+
 ## Quick Start
 
 ```bash
@@ -680,7 +682,7 @@ workspaces/{workspace_id}/sandbox/tasks/{task_id}/output/...
 
 ## DocTr Image Preprocessing
 
-`POST /workspaces/{workspace_id}/documents/{document_id}/process` 对 `file_type=image` 的文档会先调用内网 DocTr 服务做几何矫正和光照校正，输出 `deskewed_image.png` artifact。DocTr 只做图片预处理，不做 OCR；如果 DocTr 失败，worker 会写 warning event 并 fallback 到原图继续 OCR。
+`POST /workspaces/{workspace_id}/documents/{document_id}/process` 对 `file_type=image` 的文档会先调用内网 DocTr 服务做几何矫正，输出 `deskewed_image.png` artifact。当前默认 `DOCTR_ILL_REC=false`，不执行光照修复；只有部署显式开启该配置时才额外运行 IllTr。DocTr 只做图片预处理，不做 OCR；如果 DocTr 失败，worker 会写 warning event 并 fallback 到原图继续 OCR。
 
 notepatch Compose 会从仓库内 `services/doctr` 构建 `docserver` 内网服务，不暴露宿主端口。docserver 是无状态推理服务，只提供 `POST /v1/rectify` 和 `GET /healthz`：不认证、不保存业务图片、不维护用户或任务数据库，请求期间只使用临时目录，响应完成后清理。notepatch 仍是唯一的认证、权限、metadata、任务和 SeaweedFS artifact 来源。
 
@@ -737,7 +739,7 @@ WORKER_QUEUES=default python -m notepatch.entrypoints.worker
 
 `AUTO_LEARNING_PIPELINE=true` 时，上传完成后会创建现有 `document_processing_pipeline` task。资料按类型分流：
 
-1. `note`：OCR → 知识库 → 5 分钟防抖 → 忠实电子笔记 → 加权闪卡；有错题时更新最新高亮。
+1. `note`：OCR → 知识库 → 立即排队生成忠实电子笔记 → 加权闪卡；有错题时更新最新高亮。仅当部署显式把 `STUDY_NOTE_DEBOUNCE_SECONDS` 设为正数时才延迟生成。
 2. `courseware/other`：OCR → 知识库 → `detect_note_gaps`，不会自动生成或改写笔记。
 3. `homework/corrected_homework`：OCR → 题目提取 → 评分 → 答题记录/错题 → 缺口检测；已有笔记时才高亮和重建闪卡。
 4. `exam`：OCR、题目提取和缺口检测，不自动创建普通 Homework。
@@ -834,7 +836,7 @@ GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/
 
 笔记本来源标识处理与内容修改等级绑定：`verbatim` 按字面保留全部原稿，包括印刷的学校、公司或制造商文字；`spelling`、`conceptual`、`rewrite` 会排除页眉、页脚、封面中的学校、公司、生产商、出版社、Logo 和版权行。被排除的 OCR block 会记录在笔记 JSON 与版本 metadata 的 `excluded_source_blocks/excluded_notebook_identity_blocks` 中，且后端会拒绝遗漏排除、重复映射或在标题/摘要/正文中重新出现的来源标识。普通含“公司”“大学”等词的学习句子不会仅凭关键词删除。
 
-5 分钟只是 note 知识更新后的防抖窗口。客户端优先展示 `download_urls.rendered_html`，按后端主题渲染；手工修订创建新版本，错题高亮只更新最新版本。图片 note 的 OCR 是文字事实基线；Scholar Notes 的代码、公式、圈选、箭头和排版视觉参考只使用 DocTr 生成的 `deskewed_image`，绝不把原始上传图发送给文档 Skill。有效矫正 artifact 缺失或对象失效时，worker 会在 GPU lease 内从 SeaweedFS 原图自动补跑 DocTr；DocTr 暂时不可用时任务按既有策略重试，矫正图与原图同时缺失时永久失败。只有 provider 明确不支持图片时，Scholar Notes 才在同一任务中降级为 OCR-only。
+默认 `STUDY_NOTE_DEBOUNCE_SECONDS=0`，note 的知识库更新完成后会立即排队生成电子笔记；正数配置只用于部署方主动启用防抖。客户端优先展示 `download_urls.rendered_html`，按后端主题渲染；手工修订创建新版本，错题高亮只更新最新版本。图片 note 的 OCR 是文字事实基线；Scholar Notes 的代码、公式、圈选、箭头和排版视觉参考只使用 DocTr 生成的 `deskewed_image`，绝不把原始上传图发送给文档 Skill。有效矫正 artifact 缺失或对象失效时，worker 会在 GPU lease 内从 SeaweedFS 原图自动补跑 DocTr；DocTr 暂时不可用时任务按既有策略重试，矫正图与原图同时缺失时永久失败。只有 provider 明确不支持图片时，Scholar Notes 才在同一任务中降级为 OCR-only。
 
 这条 corrected-only 规则只适用于文档 Skill。普通 `/ai/chat` 图片附件仍使用用户原始图片，不会被 DocTr 矫正。`ai_visual_deskewed_reused`、`ai_visual_deskewed_regeneration_started`、`ai_visual_deskewed_regenerated` 和 `ai_visual_deskewed_original_missing` task events 可用于排查视觉准备过程；事件只包含 document/artifact ID，不包含 object key 或图片内容。
 

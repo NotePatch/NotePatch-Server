@@ -354,7 +354,7 @@ def merge_learning_units(
 ):
     source_ids = list(dict.fromkeys(payload.source_learning_unit_ids))
     if target_learning_unit_id in source_ids:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Target cannot be a source")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Target cannot be a source")
     units = db.scalars(
         select(LearningUnit).where(
             LearningUnit.workspace_id == workspace_id,

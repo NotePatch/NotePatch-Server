@@ -308,6 +308,7 @@ def test_homework_grading_creates_mistake_knowledge_and_highlights_note(client, 
             process_task(db, grade_task.id, storage=fake_storage)
             grading = db.scalar(select(GradingResult).where(GradingResult.workspace_id == workspace_id))
             assert grading is not None
+            assert grading.student_user_id == user["user"]["id"]
             assert grading.grading_mode == "provisional"
             assert grading.confidence == 0.8
             assert db.scalar(select(Mistake).where(Mistake.workspace_id == workspace_id)) is not None

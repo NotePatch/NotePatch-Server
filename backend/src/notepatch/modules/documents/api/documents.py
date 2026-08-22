@@ -120,7 +120,7 @@ def complete_upload(
     elif payload.document_id:
         query = query.where(UploadSession.document_id == payload.document_id)
     else:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="upload_session_id or document_id is required")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="upload_session_id or document_id is required")
     upload_session = db.scalar(query)
     if upload_session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload session not found")

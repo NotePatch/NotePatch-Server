@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import select
 
 from notepatch.modules.documents.models.document import Document, DocumentArtifact
@@ -58,7 +60,11 @@ def test_public_path_prefix_validates_and_builds_note_urls():
 def test_deployment_schema_revision_matches_alembic_head():
     repo_root = Path(__file__).resolve().parents[2]
     expected = Settings(_env_file=None).schema_revision
-    assert expected == "202608220002"
+    alembic_config = Config(str(repo_root / "backend/alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(repo_root / "backend/migrations")
+    )
+    assert ScriptDirectory.from_config(alembic_config).get_heads() == [expected]
     assert f"SCHEMA_REVISION: {expected}" in (repo_root / "compose.yml").read_text()
     for dockerfile in (
         repo_root / "infra/docker/backend.Dockerfile",

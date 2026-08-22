@@ -614,12 +614,12 @@ class ChatService:
             return []
         if not isinstance(raw_attachments, list):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="input.attachments must be a list",
             )
         if len(raw_attachments) > 20:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="A chat message can reference at most 20 attachments",
             )
         document_ids: list[str] = []
@@ -627,7 +627,7 @@ class ChatService:
             document_id = item.get("document_id") if isinstance(item, dict) else None
             if not isinstance(document_id, str) or not document_id.strip():
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="Each attachment must contain document_id",
                 )
             normalized_id = document_id.strip()

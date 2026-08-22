@@ -68,7 +68,7 @@ def _validate_upload_format(
         )
     if document_kind in AUTO_LEARNING_DOCUMENT_KINDS and file_type not in LEARNING_PIPELINE_FILE_TYPES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "unsupported_learning_format",
                 "message": "Learning documents must be an image, PDF, DOCX, or PPTX file",

@@ -112,6 +112,7 @@ class LearningContentOperations:
                             "homework_id": homework.id,
                             "document_id": document.id,
                             "learning_unit_id": learning_unit.id,
+                            "student_user_id": homework.created_by_user_id,
                             "source_question_task_id": task.id,
                         },
                     )

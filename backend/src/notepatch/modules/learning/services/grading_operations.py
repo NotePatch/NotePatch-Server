@@ -31,6 +31,9 @@ class LearningGradingOperations:
         existing = self._grading_for_task(task.id)
         if existing is not None:
             return {"homework_id": homework.id, "grading_result_id": existing.id, "reused": True}
+        student_user_id = task.payload.get("student_user_id") or homework.created_by_user_id
+        if task.payload.get("student_user_id") != student_user_id:
+            task.payload = {**task.payload, "student_user_id": student_user_id}
         unit = self._learning_unit_for_homework(homework)
         document = self._document(homework.document_id, task.workspace_id) if homework.document_id else None
         if document is None:
@@ -76,7 +79,7 @@ class LearningGradingOperations:
         grading = GradingResult(
             workspace_id=task.workspace_id,
             homework_id=homework.id,
-            student_user_id=task.payload.get("student_user_id"),
+            student_user_id=student_user_id,
             score=result.score,
             max_score=result.max_score,
             grading_mode=mode,
@@ -135,7 +138,7 @@ class LearningGradingOperations:
                         workspace_id=task.workspace_id,
                         learning_unit_id=unit.id,
                         knowledge_point_id=point.id,
-                        student_user_id=task.payload.get("student_user_id"),
+                        student_user_id=student_user_id,
                         homework_id=homework.id,
                         grading_result_id=grading.id,
                         question_id=question.id if question else None,
@@ -156,7 +159,7 @@ class LearningGradingOperations:
                 workspace_id=task.workspace_id,
                 grading_result_id=grading.id,
                 knowledge_point_id=point.id if point else None,
-                student_user_id=task.payload.get("student_user_id"),
+                student_user_id=student_user_id,
                 subject=unit.subject if unit else None,
                 knowledge_point=item.knowledge_point,
                 description=item.description,
