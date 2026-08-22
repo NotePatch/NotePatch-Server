@@ -139,6 +139,10 @@ AI_CHAT_TITLE_FALLBACK_LOCALE=zh-CN
 AI_CHAT_TITLE_MESSAGE_LIMIT=6
 AI_CHAT_TITLE_MAX_LENGTH=40
 AI_CHAT_TITLE_TIMEOUT_SECONDS=30
+AI_IMAGE_REMARK_ENABLED=true
+AI_IMAGE_REMARK_MODEL=openai/gpt-5.6-luna
+AI_IMAGE_REMARK_MAX_LENGTH=60
+AI_IMAGE_REMARK_TIMEOUT_SECONDS=60
 
 OpenClaw Gateway 的 sandbox 会通过宿主 Docker daemon 创建隔离容器，因此 Gateway 镜像必须同时包含 Docker CLI。统一使用仓库脚本构建，避免出现 Gateway HTTP 200 但 SSE 无回答：
 
@@ -152,7 +156,7 @@ docker compose up -d openclaw-supervisor chat-worker
 DOCTR_ENABLED=true
 DOCTR_BASE_URL=http://docserver:8000
 DOCTR_TIMEOUT_SECONDS=300
-DOCTR_ILL_REC=true
+DOCTR_ILL_REC=false
 
 OCR_ENGINE=paddleocr
 OCR_TEMP_DIR=/tmp/ocr
@@ -275,7 +279,7 @@ USER_AVATAR_MAX_SIZE_MB=5
 USER_AVATAR_MAX_DIMENSION=4096
 ```
 
-部署该功能前必须执行 `alembic upgrade head`，使数据库达到当前 head revision `202608220001`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
+部署该功能前必须执行 `alembic upgrade head`，使数据库达到当前 head revision `202608220002`。头像替换后若旧对象暂时无法删除，后端会把 `purge_avatar_object` 放入 default queue 幂等重试，不影响新资料生效。
 
 这些新接口返回统一 envelope：`{"code":"ok","message":"...","data":{...}}`。现有 task、document 和 chat 创建接口保持原响应结构。
 
@@ -390,6 +394,8 @@ curl -s http://localhost:8001/api/v1/workspaces/$WORKSPACE_ID/documents/complete
 ```
 
 如果 tusd 文件尚未完成，会返回 `409 Upload not finished`。
+
+图片备注与 `original_filename`、`title` 相互独立。用户偏好 `auto_image_remark_enabled=true` 且 upload-session 未提交 `remark` 时，后端先完成真实 OCR，再创建 AI queue 中的 `generate_image_remark` 任务。任务固定使用 `AI_IMAGE_REMARK_MODEL`（默认 `openai/gpt-5.6-luna`）与 `minimal` 思考强度，只把 `ocr_text` 发给模型，不发送原图或 DocTr 图片。OCR 无文本、开关关闭或全局功能关闭时，`remark` 使用原文件名。显式上传备注或随后通过 `PATCH /workspaces/{workspace_id}/documents/{document_id}` 编辑的备注始终优先，晚到的 AI 结果不得覆盖。旧 `ai_image_*` 响应字段仅作为兼容别名；新客户端使用 `remark/remark_source/image_remark_status/image_remark_task_id`。
 
 
 公网反向代理必须让 tusd 返回的 `Location` 保留 HTTPS 与随机公开前缀：
@@ -508,9 +514,58 @@ tusd /data volume -> api /tusd-data:ro -> SeaweedFS S3
 
 这是为了让 MVP 清晰、稳定。后续可把 tusd 切换为 S3 backend，直接写 SeaweedFS 的同一个 bucket；FastAPI webhook 仍保留 metadata 校验、状态更新和 artifact 幂等逻辑。
 
+## OpenClaw File Tools Sandbox
+
+OpenClaw 文档解析在 NotePatch 管理的隔离镜像 `notepatch-openclaw-sandbox:filetools-v1` 中执行。基础 gateway 不直接安装解析器；首次部署或工具版本变化时运行：
+
+```bash
+scripts/build_openclaw_sandbox.sh
+# 也可只构建 Compose 的 tools profile 目标
+docker compose --profile tools build openclaw-sandbox-image
+```
+
+候选镜像只有在 `network=none`、只读根文件系统、非 root、`capDrop=ALL` 和 `no-new-privileges` 条件下通过 `notepatch-file self-test` 后，才会更新正式标签。运行中的 sandbox 仍受 2 GB 内存、1.5 CPU、256 PID、执行超时和 workspace-only 文件边界限制；`exec/process` 只允许在 sandbox 内运行，不能回退到 gateway/宿主机，也没有 Docker socket、服务密钥或外网。
+
+统一工具命令：
+
+```bash
+notepatch-file inspect /workspace/.../file.pdf
+notepatch-file list /workspace/.../archive.zip
+notepatch-file extract /workspace/.../file.docx   --output-dir /workspace/notepatch/openclaw/tasks/<task-id>/output/parser/<document-id>
+```
+
+支持 PDF，DOC/DOCX、PPT/PPTX、XLS/XLSX，ODF，文本/CSV/JSON/YAML/XML/HTML，图片，EPUB，EML/MSG，IPYNB，ZIP/7z/RAR/TAR 及常见压缩流。音视频只提取 metadata、音轨和关键帧，不提供 ASR。已有 `ocr.md/ocr.txt/converted_pdf` 时 `notepatch_file_reader` 优先读取业务 artifact；否则解析原文件，并生成规范化 `manifest.json/content.md/content.txt`。加密或密码保护文件会明确失败；归档还限制路径穿越、符号链接、设备文件、嵌套、文件数、展开大小和压缩比。
+
+扩展格式仅用于 `chat_attachment` 或 `document_kind=other`，保持 `file_type=other`。学习 OCR 流水线仍只接受图片、PDF、DOCX 和 PPTX；把 EPUB、表格、邮件、压缩包或音视频声明为作业、笔记、课件时返回 `422 unsupported_learning_format`，未知格式返回 `415 unsupported_file_format`。
+
+发布前先检查，再显式应用：
+
+```bash
+scripts/rollout_openclaw_sandbox.sh
+scripts/rollout_openclaw_sandbox.sh --apply
+```
+
+脚本发现 queued/running AI task 时拒绝清理。更新后 supervisor 会按 runtime config hash 重建需要运行的用户 gateway；旧 sandbox 仅在无活动任务时删除。
+
 ## OpenClaw Gateway Runner
 
 `POST /workspaces/{workspace_id}/ai/chat` 是唯一的 AI 对话入口，会创建 `openclaw_agent_run` 异步任务。请求体使用 `prompt`、可选 BCP 47 `client_locale`、可选 `conversation_id`、可选 `input` 和可选 `options`；不传 `conversation_id` 时会自动创建会话。未传 locale 时依次使用 `Accept-Language` 和部署 fallback。响应 task payload 包含 conversation、message id 和 locale 快照，客户端通过 task 状态、events 以及会话消息接口获取最终 answer 或失败原因。注册用户时，notepatch 会为该用户生成一套独立 OpenClaw runtime 配置：
+
+空会话初始化问候通过 `GET /workspaces/{workspace_id}/ai/greeting?client_locale=zh-CN` 获取。该响应会按 locale 返回 NotePatch AI 的展示文案，并包含 `onboarding_required/onboarding_version/questions`；它不会创建会话、持久化消息或进入 OpenClaw 上下文。
+
+首次使用 AI 前必须完成用户全局个性化问卷。注册用户和本次 migration 覆盖的历史用户初始均为未完成；登录、上传、历史浏览和后台学习任务不受影响，但发送聊天会返回 `409 ai_onboarding_required`。客户端流程为：
+
+```text
+GET /api/v1/auth/ai-onboarding
+PUT /api/v1/auth/ai-onboarding
+PATCH /api/v1/auth/preferences
+```
+
+问卷包含回答语言、协作方式、详略、结构、澄清策略、反馈语气和学习引导七项必答设置，可选 `custom_instructions` 最长 1000 字。提交必须带完整 `version=1` 和全部 answers；以后可通过 `PATCH /auth/preferences` 的 `ai_preferences` 部分更新。每个新 AI task 会固化当时的偏好，重试不受之后修改影响。聊天完整使用偏好；笔记、闪卡、批改、知识库和题目提取只读取各自允许的表达字段。偏好始终低于权限、安全、事实、评分依据、资料忠实度、Skill schema 和工具限制。
+
+`learning_guidance` 必须按稳定字符串值提交，不能按选项下标转换：`answer_first` 表示先给答案，`explain_then_answer` 表示先讲方法再给答案，`hint_first` 表示题目首轮只给提示并等待学生尝试。后端会把 `hint_first` 展开为强制聊天契约，禁止首轮在标题、总结、算式结果、完整代码或例题中泄露答案；询问通用方法时可以讲策略和识别规则，但完整示例必须停在最终结果之前。客户端保存后应重新读取服务端偏好确认最终值。
+
+电子笔记的 `rewrite` 内容策略会重构整份原稿，合并 OCR 碎片并形成连贯章节；`reflow` 模式下若输出仍是一对一 OCR 搬运，后端会拒绝该结果。新增事实仍必须来自同一学习单元的可靠课件、答案或知识库证据；只有原笔记时只重构已有内容，不使用模型常识伪造补充。
 
 聊天图片通过 `input.attachments=[{"document_id":"..."}]` 引用已完成上传的文档。创建 `chat_attachment` 上传会话时可设置 `save_to_documents`：默认 `true` 会保留为 workspace 文档；设为 `false` 时只绑定首次引用它的 conversation，不进入普通文档列表或学习 Skill 的资料镜像，并在删除会话时异步 purge。临时附件仍存放于 SeaweedFS，区别是生命周期归属会话。后端不信任客户端文件名或 MIME，会按 `workspace_id + document_id` 重新校验并把规范化附件保存到 user message。后续轮次启用历史时，会把附件重新绑定到当前 task 的独立 OpenClaw 快照路径。
 
@@ -716,7 +771,11 @@ POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/generate
 {"content_edit_level":"spelling","layout_edit_level":"preserve","force_reprocess":false}
 ```
 
-策略在 task 创建时固化。Scholar Notes 只输出带来源映射的 Note IR；后端校验每个 OCR block、代码缩进、公式、表格、箭头/圈选关系和纠错证据，再确定性渲染 HTML。非 `rewrite` 模式不得漏掉或重复原始 block；`conceptual` 修正必须有高置信来源。低置信图示可保存版本专属原图裁剪，并仅通过签名 `rendered_html` 展示。
+策略在 task 创建时固化。Scholar Notes 只输出带来源映射的 Note IR；后端校验每个 OCR block、代码缩进、公式、表格、箭头/圈选关系和纠错证据，再确定性渲染 HTML。非 `rewrite` 模式不得漏掉或重复原始 block；`conceptual` 修正必须有高置信来源。上传图片和 DocTr 矫正图只作为内部视觉参考，不会被裁剪、复制或嵌入最终笔记；低置信图示仅保留可验证的结构化描述和关系，不凭空补全细节。
+
+`rewrite` 还会用原笔记标题、OCR 正文和已有知识点检索同一 LearningUnit 的课件、知识块、答案/rubric、作业题目及评分知识点。默认只选择相关度不低于 `0.75` 的前 12 项；学生答案和 provisional 评分只能提示“可能缺少哪个主题”，不能作为事实依据。每个自动补充 block 必须引用后端提供的权威证据，并在 HTML 中显示低干扰的“资料补充”标记。Note JSON 的 block 会包含 `origin="evidence_supplement"`、`source_refs` 和 `supplement_reason`，版本 metadata 则记录 `completion_count/completion_source_document_ids/completion_evidence_revision/completion_strategy`。知识库或答题 revision 在生成期间变化时，本次输出会被丢弃并重新调度。
+
+这些补全只在用户选择 `content_edit_level=rewrite` 后发生。上传课件或作业本身仍只更新知识库和缺口建议，不会静默改写现有笔记。检索依赖 BGE-M3；服务不可用时任务按既有重试机制处理，不会悄悄保存一份不完整结果。相关部署阈值为 `NOTE_REWRITE_COMPLETION_SIMILARITY_THRESHOLD` 和 `NOTE_REWRITE_COMPLETION_MAX_EVIDENCE`。
 
 `note_history_limit` 表示最新版本之外保留的历史版本数，范围 `0..100`。正文变化创建新版本；超限版本、专属对象和对应卡组异步清理，但不删除最新版本、原始资料或答题审计。
 
@@ -766,7 +825,18 @@ POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{latest_no
 GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/latest
 ```
 
-5 分钟只是 note 知识更新后的防抖窗口。客户端优先展示 `download_urls.rendered_html`，按后端主题渲染；手工修订创建新版本，错题高亮只更新最新版本。图片 note 的 OCR 是文字基线，原图同时用于转录、代码/标记关系和排版参考；不支持视觉的模型仅降级为 OCR-only。
+### 闪卡复习原因
+
+最新和历史闪卡组详情中的每张卡除 `priority_score/priority_factors` 外，还返回结构化 `review_hint`。主提示会区分最近连续答对、刚出现失误、近期频繁错误、最近做对、来自笔记和历史错误；最多三个 badges 补充连续正确次数、近期错误次数和最近结果。后端只返回稳定的 `code/message_key/tone/params`，客户端负责本地化，未知 key 回退为“建议复习”。新卡组返回 `data_quality=complete`；旧卡组只根据当时保存的权重因子返回 `legacy`，不会用当前答题记录改写历史含义。
+
+提示阈值可通过 `FLASHCARD_HINT_ERROR_WINDOW_DAYS`、`FLASHCARD_HINT_SUCCESS_WINDOW_DAYS`、`FLASHCARD_HINT_FRESH_ATTEMPT_DAYS`、`FLASHCARD_HINT_FREQUENT_ERROR_COUNT` 和 `FLASHCARD_HINT_IMPROVING_STREAK` 调整。评分产生新答题记录后会触发新卡组，排序和提示会同步更新。
+
+
+笔记本来源标识处理与内容修改等级绑定：`verbatim` 按字面保留全部原稿，包括印刷的学校、公司或制造商文字；`spelling`、`conceptual`、`rewrite` 会排除页眉、页脚、封面中的学校、公司、生产商、出版社、Logo 和版权行。被排除的 OCR block 会记录在笔记 JSON 与版本 metadata 的 `excluded_source_blocks/excluded_notebook_identity_blocks` 中，且后端会拒绝遗漏排除、重复映射或在标题/摘要/正文中重新出现的来源标识。普通含“公司”“大学”等词的学习句子不会仅凭关键词删除。
+
+5 分钟只是 note 知识更新后的防抖窗口。客户端优先展示 `download_urls.rendered_html`，按后端主题渲染；手工修订创建新版本，错题高亮只更新最新版本。图片 note 的 OCR 是文字事实基线；Scholar Notes 的代码、公式、圈选、箭头和排版视觉参考只使用 DocTr 生成的 `deskewed_image`，绝不把原始上传图发送给文档 Skill。有效矫正 artifact 缺失或对象失效时，worker 会在 GPU lease 内从 SeaweedFS 原图自动补跑 DocTr；DocTr 暂时不可用时任务按既有策略重试，矫正图与原图同时缺失时永久失败。只有 provider 明确不支持图片时，Scholar Notes 才在同一任务中降级为 OCR-only。
+
+这条 corrected-only 规则只适用于文档 Skill。普通 `/ai/chat` 图片附件仍使用用户原始图片，不会被 DocTr 矫正。`ai_visual_deskewed_reused`、`ai_visual_deskewed_regeneration_started`、`ai_visual_deskewed_regenerated` 和 `ai_visual_deskewed_original_missing` task events 可用于排查视觉准备过程；事件只包含 document/artifact ID，不包含 object key 或图片内容。
 
 历史数据校正脚本默认 dry-run：
 
@@ -787,15 +857,17 @@ docker compose exec api python /opt/notepatch/scripts/reconcile_learning_units.p
 后台会为每个用户 OpenClaw runtime 写入内置 skill 说明：
 
 ```text
+notepatch_file_reader
 notepatch_question_extractor
 notepatch_kb_builder
 notepatch_scholar_notes
+notepatch_note_supplement
 notepatch_grading
 notepatch_note_highlighter
 notepatch_flashcards
 ```
 
-每个 skill 安装在用户 `workspace/skills/`，因此启用 workspace-only 文件权限的 OpenClaw sandbox 可以读取，且不会越过 `/workspace` 边界。skill 使用固定 `input.json` 与输出文件、稳定 session key，并在输入中携带后端生成的严格 Pydantic JSON Schema。首次结构错误会在同一 session 请求校正；仍不合法则任务重试，绝不落库替代内容。Agent 仅允许读写用户 workspace，禁用 shell、浏览器和外部网络。
+每个 skill 安装在用户 `workspace/skills/`，因此启用 workspace-only 文件权限的 OpenClaw sandbox 可以读取，且不会越过 `/workspace` 边界。skill 使用固定 `input.json` 与输出文件、稳定 session key，并在输入中携带后端生成的严格 Pydantic JSON Schema。首次结构错误会在同一 session 请求校正；仍不合法则任务重试，绝不落库替代内容。Agent 仅可在用户 workspace 内读写；文件解析允许 sandbox 内的 exec/process，但浏览器、外部网络、elevated 和宿主执行始终禁用。
 
 ## OCR Pipeline
 
@@ -922,7 +994,11 @@ Last-Event-ID: 12
 
 SSE emits monotonic event IDs, heartbeat comments, and a final `done` event. Existing polling remains supported.
 
-Study notes are validated safe HTML fragments. Clients should prefer the signed download_urls.rendered_html URL, which wraps the newest highlighted/plain fragment with the note version's immutable theme and a strict CSP. Legacy notes use notepatch-paper-v1; newly generated notes use notepatch-paper-v2. Clients must use rendering.theme_id and rendering.css_url instead of hard-coding either stylesheet.
+Study notes are validated safe HTML fragments. Clients should prefer the signed `download_urls.rendered_html` URL, which wraps the newest highlighted/plain fragment with the note version's immutable theme and a strict CSP. Legacy notes retain their original themes; newly generated notes use `notepatch-paper-v4`. Note IR text is a restricted Markdown fragment that the backend deterministically renders into paragraphs, lists, headings, tables, and code before applying the HTML sanitizer. Clients must not parse the stored fragment as Markdown a second time, and must use `rendering.theme_id` plus the complete `rendering.css_url`, including its `?v=` cache revision, instead of hard-coding a stylesheet.
+
+Existing Note IR notes can be reformatted without calling AI or creating a new note version. Preview the operation with `docker compose exec -T api python /opt/notepatch/scripts/rerender_note_ir_markdown.py`; apply it with the same command plus `--apply`. Notes without `note_ir_object_key` are reported as legacy and are not modified.
+
+Rich-text editors must persist font size with controlled classes such as <span class="np-font-size-24">Text</span>. Supported sizes are 12, 14, 17, 20, 24, 28, 32, and 40 px. Inline style attributes and unsupported font-size classes are intentionally removed by the backend sanitizer.
 
 ### Operations
 

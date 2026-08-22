@@ -10,6 +10,7 @@ from notepatch.entrypoints.deps import (
     get_workspace_member,
 )
 from notepatch.platform.database import get_db
+from notepatch.modules.identity.services.ai_preferences import AI_ONBOARDING_VERSION, AiPreferenceService
 from notepatch.modules.identity.services.permissions import require_member_permission
 from notepatch.modules.documents.models.document import Document
 from notepatch.modules.learning.models.learning import LearningUnit, LearningUnitDocument, StudyNoteVersion
@@ -24,6 +25,7 @@ from notepatch.modules.ai.schemas.ai import (
     ChatConversationPage,
     ChatConversationRead,
     ChatConversationUpdate,
+    ChatGreetingRead,
     ChatMessagePage,
     ChatMessageRead,
     ChatMessageRevisionRequest,
@@ -32,6 +34,7 @@ from notepatch.modules.ai.schemas.ai import (
 )
 from notepatch.modules.tasks.schemas.task import TaskRead
 from notepatch.modules.ai.services.chat import ChatConversationNotFoundError, ChatService
+from notepatch.modules.ai.services.greeting import chat_greeting
 from notepatch.modules.ai.services.locale import resolve_client_locale
 from notepatch.modules.ai.services.model_catalog import (
     AiModelCatalogService,
@@ -46,6 +49,34 @@ from notepatch.platform.storage import StorageService
 from notepatch.shared.api import ApiEnvelope, ApiError
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/ai", tags=["ai"])
+
+
+@router.get("/greeting", response_model=ChatGreetingRead)
+def get_chat_greeting(
+    workspace_id: str,
+    client_locale: str | None = Query(
+        default=None,
+        max_length=35,
+        pattern=r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$",
+    ),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    member: WorkspaceMember = Depends(get_workspace_member),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_member_permission(db, member, "ai.run")
+    locale = resolve_client_locale(
+        client_locale,
+        accept_language,
+        get_settings().ai_chat_title_fallback_locale,
+    )
+    greeting = chat_greeting(locale)
+    return {
+        **greeting,
+        "onboarding_required": not AiPreferenceService.is_completed(current_user),
+        "onboarding_version": AI_ONBOARDING_VERSION,
+        "questions": AiPreferenceService.questions(),
+    }
 
 
 @router.get("/models", response_model=AiModelCatalogRead)

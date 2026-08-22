@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import httpx
 
+from notepatch.modules.identity.services.ai_preferences import AiPreferenceService
 from notepatch.platform.config import get_settings
 from notepatch.platform.errors import RetryableTaskError, TaskCancelledError
 
@@ -43,6 +44,20 @@ class OpenClawRunner(ABC):
         runtime: dict,
         provider_model: str,
         client_locale: str,
+        max_length: int,
+        timeout_seconds: float,
+    ) -> str | None:
+        return None
+
+    def generate_image_remark(
+        self,
+        workspace_id: str,
+        document_id: str,
+        ocr_text: str,
+        *,
+        original_filename: str,
+        runtime: dict,
+        provider_model: str,
         max_length: int,
         timeout_seconds: float,
     ) -> str | None:
@@ -261,6 +276,59 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         self._raise_embedded_gateway_error(title)
         return title or None
 
+    def generate_image_remark(
+        self,
+        workspace_id: str,
+        document_id: str,
+        ocr_text: str,
+        *,
+        original_filename: str,
+        runtime: dict,
+        provider_model: str,
+        max_length: int,
+        timeout_seconds: float,
+    ) -> str | None:
+        instruction = (
+            "Write a concise user-facing remark for an uploaded image using only its OCR text. "
+            "Summarize the recognizable subject or topic; do not describe visual details that OCR cannot prove. "
+            "Use the dominant language of the OCR text. Do not repeat the upload filename, infer private identity, "
+            "or foreground school, company, manufacturer, or notebook branding unless it is the actual subject. "
+            f"Use at most {max_length} characters. Return only the remark without quotes, "
+            "Markdown, prefixes, explanations, or terminal punctuation."
+        )
+        request_body = {
+            "model": self._gateway_request_model({}),
+            "stream": False,
+            "reasoning_effort": "minimal",
+            "reasoning_mode": "off",
+            "messages": [
+                {"role": "system", "content": instruction},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{instruction}\n\n"
+                        f"Original filename (context only, never copy it): {original_filename}\n"
+                        f"OCR text:\n{ocr_text}"
+                    ),
+                },
+            ],
+        }
+        response_json = self._post_chat_completion(
+            request_body,
+            gateway_url=self._gateway_url(runtime),
+            gateway_token=(
+                runtime.get("gateway_token")
+                if isinstance(runtime.get("gateway_token"), str)
+                else None
+            ),
+            session_key=f"notepatch:{workspace_id}:image-remark:{document_id}",
+            provider_model=provider_model,
+            timeout_seconds=timeout_seconds,
+        )
+        remark = self._extract_answer(response_json).strip()
+        self._raise_embedded_gateway_error(remark)
+        return remark or None
+
     def collect_output(self, workspace_id: str, task_id: str) -> dict:
         output_dir = self._task_output_dirs.get((workspace_id, task_id))
         if output_dir is None:
@@ -281,6 +349,26 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
             raise OpenClawRunnerError("OpenClaw task payload.prompt must be a non-empty string")
 
         messages = self._conversation_messages(payload)
+        preference_snapshot = payload.get("ai_preferences")
+        if isinstance(preference_snapshot, dict):
+            preference_domain = payload.get("preference_domain")
+            if not isinstance(preference_domain, str) or not preference_domain.strip():
+                preference_domain = "chat"
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": AiPreferenceService.system_instruction(
+                        preference_snapshot,
+                        domain=preference_domain,
+                        client_locale=(
+                            payload.get("client_locale")
+                            if isinstance(payload.get("client_locale"), str)
+                            else None
+                        ),
+                    ),
+                },
+            )
         current_user_index = self._current_user_message_index(messages, prompt.strip())
         if current_user_index is None:
             messages.append({"role": "user", "content": prompt.strip()})
@@ -668,15 +756,34 @@ class OpenClawGatewayRunner(LocalTaskDirMixin, OpenClawRunner):
         documents_index = runtime.get("documents_index_path")
         documents_root = runtime.get("documents_root_path")
         task_output = runtime.get("task_output_path")
+        attachments = runtime.get("attachment_files")
         if not any(isinstance(value, str) and value for value in (documents_index, documents_root, task_output)):
             return ""
-        return (
+        lines = [
             "NotePatch user data is mounted in the OpenClaw workspace.\n"
             f"- Documents index: {documents_index}\n"
             f"- Documents root: {documents_root}\n"
             f"- Write task outputs to: {task_output}\n"
             "Use only the files under these paths for this NotePatch task."
-        )
+        ]
+        if isinstance(attachments, list) and attachments:
+            lines.append("\nFiles explicitly attached to this message:")
+            for item in attachments:
+                if not isinstance(item, dict):
+                    continue
+                document_id = item.get("document_id")
+                filename = item.get("filename") or "attachment"
+                preferred = (
+                    item.get("ocr_markdown_path")
+                    or item.get("ocr_text_path")
+                    or item.get("original_path")
+                )
+                lines.append(f"- {filename} (document_id={document_id}): {preferred}")
+            lines.append(
+                "Prefer OCR Markdown/text when listed. For an original binary file, use "
+                f"`notepatch-file inspect` and write `notepatch-file extract` output under {task_output}/parser/."
+            )
+        return "\n".join(lines)
 
 
 def get_openclaw_runner() -> OpenClawRunner:

@@ -122,6 +122,8 @@ class DocumentPurgeService:
         rebuild_tasks = self._schedule_rebuilds(task, context)
 
         document.title = None
+        document.remark = None
+        document.remark_source = None
         document.original_filename = "[deleted]"
         document.mime_type = None
         document.file_size = None

@@ -40,9 +40,8 @@ def test_public_path_prefix_validates_and_builds_note_urls():
     )
     renderer = NoteRenderService(settings)
     assert renderer.create_url(note).startswith(f"{prefix}/api/v1/assets/study-notes/render?")
-    assert f'href="{prefix}/api/v1/assets/note-themes/notepatch-paper-v1.css"' in renderer.wrap_html(
-        note, "<article>Note</article>"
-    )
+    wrapped = renderer.wrap_html(note, "<article>Note</article>")
+    assert f'href="{prefix}/api/v1/assets/note-themes/notepatch-paper-v1.css?v=' in wrapped
 
     absolute = Settings(
         _env_file=None,
@@ -59,7 +58,7 @@ def test_public_path_prefix_validates_and_builds_note_urls():
 def test_deployment_schema_revision_matches_alembic_head():
     repo_root = Path(__file__).resolve().parents[2]
     expected = Settings(_env_file=None).schema_revision
-    assert expected == "202608220001"
+    assert expected == "202608220002"
     assert f"SCHEMA_REVISION: {expected}" in (repo_root / "compose.yml").read_text()
     for dockerfile in (
         repo_root / "infra/docker/backend.Dockerfile",
@@ -90,6 +89,16 @@ def test_versioned_note_theme_is_public_and_immutable(client):
     assert response.status_code == 200
     assert "immutable" in response.headers["cache-control"]
     assert ".np-note-theme" in response.text
+
+
+@pytest.mark.parametrize(
+    "theme_id", ["notepatch-paper-v1", "notepatch-paper-v2", "notepatch-paper-v3", "notepatch-paper-v4"]
+)
+def test_note_themes_define_all_supported_font_sizes(client, theme_id):
+    response = client.get(f"/api/v1/assets/note-themes/{theme_id}.css")
+    assert response.status_code == 200
+    for size in (12, 14, 17, 20, 24, 28, 32, 40):
+        assert f".np-font-size-{size}{{font-size:{size}px!important}}" in response.text
 
 
 def test_signed_render_url_prefers_highlight_and_rejects_bad_token(client, db_sessionmaker, fake_storage):

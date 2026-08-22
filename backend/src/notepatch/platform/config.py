@@ -72,9 +72,20 @@ class Settings(BaseSettings):
     tusd_data_dir: str = "/tusd-data"
     upload_max_file_size_mb: int = 200
     upload_allowed_mime_types: str = (
-        "image/jpeg,image/png,image/webp,image/tiff,application/pdf,"
+        "image/jpeg,image/png,image/webp,image/tiff,image/gif,image/bmp,image/heic,application/pdf,"
+        "application/msword,application/rtf,application/vnd.ms-excel,application/vnd.ms-powerpoint,"
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation,"
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+        "application/vnd.oasis.opendocument.text,application/vnd.oasis.opendocument.presentation,"
+        "application/vnd.oasis.opendocument.spreadsheet,text/plain,text/markdown,text/csv,"
+        "text/tab-separated-values,application/json,application/x-ndjson,application/yaml,text/yaml,"
+        "application/xml,text/xml,text/html,application/epub+zip,message/rfc822,"
+        "application/vnd.ms-outlook,application/x-ipynb+json,audio/mpeg,audio/wav,audio/x-wav,"
+        "audio/mp4,audio/ogg,audio/aac,audio/flac,video/mp4,video/quicktime,video/x-matroska,"
+        "video/webm,video/x-msvideo,application/zip,application/x-7z-compressed,application/vnd.rar,"
+        "application/x-rar-compressed,application/x-tar,application/gzip,application/x-bzip2,"
+        "application/x-xz,application/zstd"
     )
     clamav_enabled: bool = False
     clamav_host: str = "clamav"
@@ -98,6 +109,11 @@ class Settings(BaseSettings):
     openclaw_user_runtime_root: str = "/home/usr/notepatch-data/openclaw"
     openclaw_docker_network: str = "notepatch-server_default"
     openclaw_user_gateway_image: str = "openclaw-webui-node-docker:local"
+    openclaw_sandbox_image: str = "notepatch-openclaw-sandbox:filetools-v1"
+    openclaw_sandbox_memory_limit: str = "2g"
+    openclaw_sandbox_cpus: float = 1.5
+    openclaw_sandbox_pids_limit: int = 256
+    openclaw_sandbox_exec_timeout_seconds: int = 300
     openclaw_user_gateway_autostart: bool = False
     openclaw_user_gateway_token_prefix: str = "notepatch"
     openclaw_user_runtime_uid: int = 1000
@@ -122,13 +138,21 @@ class Settings(BaseSettings):
     ai_chat_title_message_limit: int = 6
     ai_chat_title_max_length: int = 40
     ai_chat_title_timeout_seconds: float = 30
+    ai_image_remark_enabled: bool = True
+    ai_image_remark_model: str = "openai/gpt-5.6-luna"
+    ai_image_remark_max_length: int = 60
+    ai_image_remark_timeout_seconds: float = 60
     ai_chat_stream_flush_milliseconds: int = 250
     ai_chat_stream_chunk_max_chars: int = 1024
     ai_chat_stream_max_reasoning_chars: int = 32_768
     ai_chat_stream_max_answer_chars: int = 131_072
     ai_chat_cancel_poll_seconds: float = 0.25
-    study_note_debounce_seconds: int = 300
+    study_note_debounce_seconds: int = 0
     knowledge_point_match_threshold: float = 0.88
+    note_rewrite_completion_similarity_threshold: float = 0.75
+    note_rewrite_completion_max_evidence: int = 12
+    note_rewrite_completion_query_max_chars: int = 8000
+    note_rewrite_completion_evidence_max_chars: int = 6000
     flashcard_error_half_life_days: float = 30.0
     flashcard_success_half_life_days: float = 14.0
     flashcard_error_multiplier: float = 2.5
@@ -136,13 +160,18 @@ class Settings(BaseSettings):
     flashcard_correct_streak_multiplier: float = 0.7
     flashcard_max_correct_streak: int = 5
     flashcard_max_cards: int = 40
+    flashcard_hint_error_window_days: int = 30
+    flashcard_hint_success_window_days: int = 14
+    flashcard_hint_fresh_attempt_days: int = 7
+    flashcard_hint_frequent_error_count: int = 2
+    flashcard_hint_improving_streak: int = 2
     note_highlight_red_threshold: float = 3.0
     note_highlight_yellow_threshold: float = 1.5
 
     doctr_enabled: bool = True
     doctr_base_url: str = "http://docserver:8000"
     doctr_timeout_seconds: float = 300
-    doctr_ill_rec: bool = True
+    doctr_ill_rec: bool = False
 
     ocr_engine: str = "paddleocr"
     ocr_temp_dir: str = "/tmp/ocr"
@@ -185,7 +214,7 @@ class Settings(BaseSettings):
     metrics_token: str | None = None
     release_revision: str = "dev"
     release_build_time: str = "unknown"
-    schema_revision: str = "202608220001"
+    schema_revision: str = "202608220003"
     rate_limit_enabled: bool = False
     auth_rate_limit_per_minute: int = 20
     upload_rate_limit_per_minute: int = 30

@@ -270,6 +270,7 @@ def client(
     old_clamav_enabled = settings.clamav_enabled
     old_public_api_base_url = settings.public_api_base_url
     old_public_path_prefix = settings.public_path_prefix
+    old_ai_image_naming_enabled = settings.ai_image_remark_enabled
     settings.tusd_data_dir = str(tmp_path)
     settings.openclaw_user_runtime_root = str(tmp_path / "openclaw-users")
     settings.openai_api_key = None
@@ -282,6 +283,7 @@ def client(
     settings.clamav_enabled = False
     settings.public_api_base_url = ""
     settings.public_path_prefix = ""
+    settings.ai_image_remark_enabled = False
     from tests.fakes import FakeEmbeddingClient, FakeSkillRunner, fake_ocr_pipeline
 
     monkeypatch.setattr("notepatch.modules.tasks.services.executor.OcrPipeline", fake_ocr_pipeline)
@@ -321,19 +323,46 @@ def client(
     settings.clamav_enabled = old_clamav_enabled
     settings.public_api_base_url = old_public_api_base_url
     settings.public_path_prefix = old_public_path_prefix
+    settings.ai_image_remark_enabled = old_ai_image_naming_enabled
 
 
 def auth_headers(access_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
 
 
-def register_user(client: TestClient, email: str, password: str = "password123") -> dict:
+def register_user(
+    client: TestClient,
+    email: str,
+    password: str = "password123",
+    *,
+    complete_ai_onboarding: bool = True,
+) -> dict:
     response = client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": email.split("@")[0]},
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    result = response.json()
+    if complete_ai_onboarding:
+        onboarding = client.put(
+            "/api/v1/auth/ai-onboarding",
+            headers=auth_headers(result["access_token"]),
+            json={
+                "version": 1,
+                "answers": {
+                    "response_language": "match_user",
+                    "collaboration_style": "collaborative",
+                    "response_depth": "balanced",
+                    "response_structure": "adaptive",
+                    "clarification_policy": "ask_when_ambiguous",
+                    "feedback_tone": "neutral",
+                    "learning_guidance": "explain_then_answer",
+                    "custom_instructions": None,
+                },
+            },
+        )
+        assert onboarding.status_code == 200, onboarding.text
+    return result
 
 
 def first_workspace_id(client: TestClient, access_token: str) -> str:

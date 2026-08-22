@@ -105,6 +105,49 @@ def messages(client, token: str, workspace_id: str, conversation_id: str) -> lis
     assert response.status_code == 200, response.text
     return response.json()["items"]
 
+
+def test_chat_initial_greeting_is_localized_and_not_persisted(client):
+    user = register_user(client, "chat-greeting@example.com")
+    token = user["access_token"]
+    workspace_id = first_workspace_id(client, token)
+
+    response = client.get(
+        f"/api/v1/workspaces/{workspace_id}/ai/greeting?client_locale=pt-BR",
+        headers=auth_headers(token),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "assistant_name": "NotePatch AI",
+        "message": (
+            "A NotePatch AI pode organizar ideias, analisar materiais de estudo e responder "
+            "a perguntas. As respostas aceitam Markdown."
+        ),
+        "message_key": "ai.chat.initial_greeting",
+        "format": "markdown",
+        "locale": "pt-BR",
+        "onboarding_required": False,
+        "onboarding_version": 1,
+        "questions": body["questions"],
+    }
+    assert len(body["questions"]) == 7
+    assert {item["id"] for item in body["questions"]} == {
+        "response_language",
+        "collaboration_style",
+        "response_depth",
+        "response_structure",
+        "clarification_policy",
+        "feedback_tone",
+        "learning_guidance",
+    }
+
+    conversations = client.get(
+        f"/api/v1/workspaces/{workspace_id}/ai/conversations",
+        headers=auth_headers(token),
+    )
+    assert conversations.status_code == 200
+    assert conversations.json()["total"] == 0
+
 def create_ready_image(
     client,
     db_sessionmaker,

@@ -174,7 +174,7 @@ def _batched_illumination_rectification(models: dict[str, Any], img_geo: Any, ou
     Image.fromarray(result_image).save(output_file, compress_level=PNG_COMPRESS_LEVEL)
 
 
-def rectify_document(input_path: str, output_path: str, ill_rec: bool = True) -> None:
+def rectify_document(input_path: str, output_path: str, ill_rec: bool = False) -> None:
     """Rectify one photographed document image and write the final PNG output."""
     models = _models()
     torch = models["torch"]

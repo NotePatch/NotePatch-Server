@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 NOTEPATCH_SKILLS = (
+    "notepatch_file_reader",
     "notepatch_question_extractor",
     "notepatch_kb_builder",
     "notepatch_scholar_notes",
@@ -74,6 +75,14 @@ class OpenClawRuntimeConfig:
             "__MODEL_JSON__": json.dumps(self.settings.openclaw_agent_model),
             "__SKILLS_JSON__": json.dumps(list(NOTEPATCH_SKILLS)),
             "__MODELS_JSON__": json.dumps(models),
+            "__SANDBOX_IMAGE_JSON__": json.dumps(self.settings.openclaw_sandbox_image),
+            "__SANDBOX_CONTAINER_PREFIX_JSON__": json.dumps(
+                self.sandbox_container_prefix(user_id)
+            ),
+            "__SANDBOX_MEMORY_JSON__": json.dumps(self.settings.openclaw_sandbox_memory_limit),
+            "__SANDBOX_CPUS__": json.dumps(self.settings.openclaw_sandbox_cpus),
+            "__SANDBOX_PIDS_LIMIT__": str(self.settings.openclaw_sandbox_pids_limit),
+            "__SANDBOX_EXEC_TIMEOUT__": str(self.settings.openclaw_sandbox_exec_timeout_seconds),
         }
         rendered = self._template("openclaw.json.template")
         for token, value in replacements.items():
@@ -128,6 +137,7 @@ class OpenClawRuntimeConfig:
         configured = [
             self.settings.openclaw_agent_model,
             self.settings.ai_chat_title_model,
+            self.settings.ai_image_remark_model,
             getattr(user, "preferred_ai_model", None),
             *(model_ids or ()),
         ]

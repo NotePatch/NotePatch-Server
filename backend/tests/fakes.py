@@ -66,6 +66,7 @@ class FakeSkillRunner:
         output_filename,
         schema,
         visual_document_ids=None,
+        output_validator=None,
     ):
         if schema is QuestionExtractionResult:
             payload = {
@@ -101,30 +102,94 @@ class FakeSkillRunner:
             knowledge_points = input_payload.get("knowledge_points", [])
             point = knowledge_points[0]
             source_blocks = input_payload["source_blocks"]
+            note_blocks = [
+                {
+                    "id": f"note-block-{index}",
+                    "type": "text",
+                    "source_block_ids": [source["id"]],
+                    "source_document_id": source["document_id"],
+                    "page_index": source["page_index"],
+                    "bbox": source["bbox"],
+                    "reading_order": source["reading_order"],
+                    "knowledge_point_id": point["id"],
+                    "text": source["text"],
+                    "confidence": 0.99,
+                }
+                for index, source in enumerate(source_blocks, start=1)
+            ]
+            note_policy = input_payload.get("note_policy") or {}
+            if (
+                note_policy.get("content_edit_level") == "rewrite"
+                and note_policy.get("layout_edit_level") == "reflow"
+            ):
+                grouped_sources = {}
+                for source in source_blocks:
+                    grouped_sources.setdefault(source["document_id"], []).append(source)
+                note_blocks = [
+                    {
+                        "id": f"note-block-{index}",
+                        "type": "text",
+                        "source_block_ids": [source["id"] for source in items],
+                        "source_document_id": document_id,
+                        "page_index": items[0]["page_index"],
+                        "bbox": items[0]["bbox"],
+                        "reading_order": min(source["reading_order"] for source in items),
+                        "knowledge_point_id": point["id"],
+                        "text": "\n".join(source["text"] for source in items),
+                        "confidence": 0.99,
+                    }
+                    for index, (document_id, items) in enumerate(grouped_sources.items(), start=1)
+                ]
+            completion = next(
+                (
+                    item
+                    for item in input_payload.get("completion_evidence", [])
+                    if item.get("authoritative")
+                ),
+                None,
+            )
+            output_points = [point]
+            if completion is not None:
+                completion_point = next(
+                    (
+                        item
+                        for item in knowledge_points
+                        if item["id"] == completion.get("knowledge_point_id")
+                    ),
+                    point,
+                )
+                if completion_point["id"] != point["id"]:
+                    output_points.append(completion_point)
+                note_blocks.append(
+                    {
+                        "id": "evidence-supplement-1",
+                        "type": "text",
+                        "origin": "evidence_supplement",
+                        "source_refs": [{"evidence_id": completion["id"]}],
+                        "supplement_reason": "Completes a directly related missing concept.",
+                        "page_index": 0,
+                        "bbox": [0, 0, 1, 1],
+                        "reading_order": len(note_blocks) + 1,
+                        "knowledge_point_id": completion_point["id"],
+                        "text": completion["text"],
+                        "confidence": 0.99,
+                    }
+                )
             payload = {
                 "title": "Linear Functions Scholar Notes",
                 "note_ir": {
                     "summary": "A compact review of linear functions.",
-                    "blocks": [
-                        {
-                            "id": f"note-block-{index}",
-                            "type": "text",
-                            "source_block_ids": [source["id"]],
-                            "source_document_id": source["document_id"],
-                            "page_index": source["page_index"],
-                            "bbox": source["bbox"],
-                            "reading_order": source["reading_order"],
-                            "knowledge_point_id": point["id"],
-                            "text": source["text"],
-                            "confidence": 0.99,
-                        }
-                        for index, source in enumerate(source_blocks, start=1)
-                    ],
+                    "blocks": note_blocks,
                 },
                 "corrections": [],
                 "outline": ["Linear Functions"],
                 "knowledge_points": [
-                    {"id": point["id"], "name": point["name"], "section_id": "linear-functions"}
+                    {
+                        "id": item["id"],
+                        "name": item["name"],
+                        "section_id": f"linear-functions-{index}",
+                    }
+                    for index, item in enumerate(output_points, start=1)
                 ],
                 "review_suggestions": ["Practice slope questions"],
                 "source_document_ids": document_ids,
@@ -221,7 +286,10 @@ class FakeSkillRunner:
             }
         else:
             raise AssertionError(f"Unhandled test schema: {schema}")
-        return schema.model_validate(payload), {
+        result = schema.model_validate(payload)
+        if output_validator is not None:
+            output_validator(result)
+        return result, {
             "skill": skill_name,
             "output_key": f"test/{task.id}/{output_filename}",
             "input_key": f"test/{task.id}/input.json",

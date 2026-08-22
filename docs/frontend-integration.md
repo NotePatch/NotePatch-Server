@@ -246,6 +246,30 @@ ETag: "profile-3"
 }
 ```
 
+登录、注册、refresh 和 `GET /auth/me` 返回的 `user` 还包含图片备注开关：
+
+```ts
+type User = {
+  id: string;
+  email: string;
+  full_name: string | null;
+  auto_image_remark_enabled: boolean;
+  // 其余字段省略
+};
+```
+
+读取该值初始化 App 设置项。修改开关使用：
+
+```http
+PATCH /api/v1/auth/preferences
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{"auto_image_remark_enabled":false}
+```
+
+响应是更新后的 `UserRead`。该设置是用户全局偏好，只影响之后创建的图片上传；不会批量改写已经存在的备注。不要只在客户端本地保存开关。
+
 更新姓名或邮箱：
 
 ```http
@@ -361,6 +385,8 @@ type UploadSessionResponse = {
     workspace_id: string;
     status: "created" | "uploading" | "uploaded" | "scanning" | "processing" | "ready" | "failed" | "deleted";
     original_filename: string;
+    remark: string | null;
+    remark_source: "user" | "ai_ocr" | "original_filename" | null;
     mime_type: string | null;
     file_size: number | null;
     file_type: "image" | "pdf" | "docx" | "pptx" | "audio" | "video" | "other";
@@ -368,6 +394,8 @@ type UploadSessionResponse = {
     retention_scope: "workspace" | "conversation";
     chat_conversation_id: string | null;
     save_to_documents: boolean;
+    image_remark_status: "waiting_upload" | "waiting_ocr" | "queued" | "running" | "succeeded" | "failed" | "empty_ocr" | "disabled" | "user" | null;
+    image_remark_task_id: string | null;
     bucket: string;
     object_key: string;
   };
@@ -387,6 +415,7 @@ async function createUploadSession(
   file: File,
   documentKind = "other",
   saveToDocuments = true,
+  remark?: string,
 ) {
   return apiFetch<UploadSessionResponse>(`/workspaces/${workspaceId}/documents/upload-session`, {
     method: "POST",
@@ -397,6 +426,7 @@ async function createUploadSession(
       document_kind: documentKind,
       save_to_documents: saveToDocuments,
       title: file.name,
+      ...(remark ? { remark } : {}),
       metadata: {},
     }),
   });
@@ -460,6 +490,33 @@ tusd 也会通过 webhook 自动完成上传；前端主动调用 `complete-uplo
 `complete-upload`，应让 tus SDK 重新上传或恢复该 URL。
 
 上传成功后，重新读取 document 详情或列表。`complete-upload` 返回最新 `Document`：显式学习类型在 `AUTO_LEARNING_PIPELINE=true` 时会自动排入处理队列；`chat_attachment` 和未自动处理的 `other` 通常直接为 `ready`。若客户端需要取得自动任务 ID，可在完成上传后立即调用一次 `process`，后端会复用同文档仍在 queued/running 的处理任务；已经 `ready` 的文档不要无条件再次调用，除非用户明确要求重处理。
+
+图片备注遵循固定优先级：upload-session 显式 `remark` > 用户后续编辑 > OCR 后 AI 自动备注 > 原文件名。用户全局开关由 `PATCH /auth/preferences` 的 `auto_image_remark_enabled` 控制，默认开启；关闭后新上传且未填写备注的文件直接使用 `original_filename`。开启时后端先完成 OCR，再创建 `generate_image_remark` AI 任务，固定使用 `openai/gpt-5.6-luna` 与 `minimal` 思考强度，只发送 OCR 文本，不发送原图或 DocTr 图片。OCR 为空时也回退原文件名。
+
+客户端优先展示 `document.remark ?? document.original_filename`，原始文件名始终读取 `document.original_filename`。自动生成期间可以立即展示当前 `remark`（初始值为原文件名），根据 `image_remark_status` 显示非阻塞状态，并通过 `image_remark_task_id` 轮询 task/events。旧 `ai_image_name/ai_image_naming_*` 仅为旧版本兼容字段，新客户端不要读取。
+
+状态建议：
+
+| `image_remark_status` | 客户端行为 |
+| --- | --- |
+| `waiting_upload` / `waiting_ocr` / `queued` / `running` | 显示当前备注，可附加“正在识别备注”，不要阻塞文件使用 |
+| `succeeded` | 刷新 Document，显示 AI OCR 备注 |
+| `empty_ocr` / `disabled` | 正常显示原文件名，不展示错误 |
+| `user` | 显示用户备注，不再等待 AI |
+| `failed` | 保留当前备注，可提供稍后重试提示 |
+
+编辑备注：
+
+```http
+PATCH /workspaces/{workspace_id}/documents/{document_id}
+Content-Type: application/json
+
+{"remark":"CPU 与寄存器课堂笔记"}
+```
+
+保存后 `remark_source=user`，后端会取消该文档尚未完成的自动备注任务，避免模型晚到覆盖用户内容。
+
+App 编辑框应以 `remark` 为初值，长度限制为 255。提交成功后用完整响应替换本地 Document；不要同时修改 `original_filename` 或 `title`。空字符串会返回 `422`，如需“恢复原文件名”，提交 `original_filename` 作为新的用户备注即可。
 
 ## Documents
 
@@ -657,6 +714,82 @@ async function waitForTask(workspaceId: string, taskId: string) {
 
 ## AI Chat History
 
+空会话页面的初始化问候由后端提供，不要再在客户端硬编码：
+
+```http
+GET /api/v1/workspaces/{workspace_id}/ai/greeting?client_locale=zh-CN
+```
+
+响应包含 `assistant_name/message/message_key/format/locale/onboarding_required/onboarding_version/questions`。前端在尚未选中会话或当前会话没有消息时展示 `message`；创建首条真实消息后隐藏。该问候不会写入 PostgreSQL、不会创建 conversation，也不会注入 OpenClaw 历史。`client_locale` 未传时后端使用 `Accept-Language`，再回退到部署默认 locale。
+
+### AI 初始化问卷
+
+注册、登录和 refresh 返回的 `user` 以及 `GET /auth/me` 包含：
+
+```ts
+type AiOnboardingState = {
+  ai_onboarding_version: number;
+  ai_onboarding_completed_at: string | null;
+  ai_onboarding_completed: boolean;
+  ai_preferences: AiPreferences | Record<string, never>;
+};
+
+type AiPreferences = {
+  response_language: "match_user" | "client_locale" | "zh-CN" | "en-US" | "pt-BR";
+  collaboration_style: "direct" | "collaborative" | "coach" | "socratic";
+  response_depth: "concise" | "balanced" | "detailed";
+  response_structure: "adaptive" | "steps" | "bullets" | "prose";
+  clarification_policy: "ask_when_ambiguous" | "assume_when_safe" | "confirm_before_actions";
+  feedback_tone: "gentle" | "neutral" | "strict";
+  learning_guidance: "answer_first" | "explain_then_answer" | "hint_first";
+  custom_instructions: string | null;
+};
+```
+
+`learning_guidance` 必须按语义原样提交，不能按选项下标映射：
+
+- `answer_first`：先给答案，再解释。
+- `explain_then_answer`：先解释方法，再给答案。
+- `hint_first`：题目首轮只给提示或引导问题，不直接泄露最终答案；询问通用方法时可讲策略，但完整例题必须停在最终结果之前；用户在获得引导后明确要求答案时才可给出。
+
+客户端保存设置后应重新读取 `GET /api/v1/auth/ai-onboarding` 或 `/api/v1/auth/me`，以服务端返回值作为最终状态。AI task 会在创建时固化该偏好，修改设置只影响之后创建的 task。
+
+进入 AI 页面时先检查 `ai_onboarding_completed`，并以服务端问题目录渲染七步表单：
+
+```http
+GET /api/v1/auth/ai-onboarding
+PUT /api/v1/auth/ai-onboarding
+Content-Type: application/json
+
+{
+  "version": 1,
+  "answers": {
+    "response_language": "match_user",
+    "collaboration_style": "collaborative",
+    "response_depth": "balanced",
+    "response_structure": "adaptive",
+    "clarification_policy": "ask_when_ambiguous",
+    "feedback_tone": "neutral",
+    "learning_guidance": "explain_then_answer",
+    "custom_instructions": null
+  }
+}
+```
+
+`GET` 返回 `version/completed/completed_at/answers/questions`。问题及选项使用稳定的 `message_key/label_key`，客户端负责本地化；每项都必须选择，但可选择默认值，不能整体跳过。问卷不调用模型、不写聊天历史。未完成时发送 chat 返回：
+
+```json
+{
+  "detail": {
+    "code": "ai_onboarding_required",
+    "version": 1,
+    "onboarding_url": "/api/v1/auth/ai-onboarding"
+  }
+}
+```
+
+客户端收到该 `409` 时打开问卷，不要把它显示成普通聊天失败气泡。设置页可调用 `PATCH /api/v1/auth/preferences`，例如 `{"ai_preferences":{"response_depth":"detailed"}}`；修改只影响之后创建的任务。`custom_instructions` 最长 1000 字，不能覆盖安全、评分、知识来源、笔记忠实度和工具限制。
+
 `POST /workspaces/{workspace_id}/ai/chat` 会自动创建或继续一条持久化对话。请求不传 `conversation_id` 时后端创建新会话；响应 task 的 `payload.conversation_id`、`user_message_id` 和 `assistant_message_id` 用于刷新当前会话。assistant message 会先以 `queued` 出现，worker 处理期间变为 `running`，最终为 `succeeded`、`failed` 或 `cancelled`。
 
 ```ts
@@ -749,6 +882,15 @@ AI 助手中的图片或文件必须以 `document_kind: "chat_attachment"` 创�
 临时附件仍必须先上传到 SeaweedFS，不能只把 base64 留在请求或手机内存里；“只在上下文中储存”表示生命周期属于会话，而不是不落对象存储。`save_to_documents=false` 只允许用于 `chat_attachment`，对 homework/courseware/note 等类型会返回 `422`。聊天附件不触发 OCR、知识库、电子笔记、评分或闪卡。为兼容旧客户端，`other` 也不再自动进入学习流水线。真正的学习资料必须显式选择 `courseware`、`note`、`homework`、`corrected_homework` 或 `exam`。
 
 不要在聊天附件上传完成后调用 `/documents/{document_id}/process`。服务端会对 `chat_attachment` 返回 `409`，防止客户端误操作。
+
+### AI 附件支持格式与解析边界
+
+`chat_attachment` 和 `document_kind=other` 可上传 PDF、Office/ODF、电子表格、文本数据、图片、EPUB、EML/MSG、IPYNB、常见压缩包和音视频。扩展格式在 Document 中仍返回 `file_type="other"`，旧客户端不需要增加枚举。后端会在每个 OpenClaw task 的无网络 sandbox 中优先读取已有 OCR artifact，否则使用 `notepatch-file` 解析原文件；前端不要调用 parser、OpenClaw 或对象存储。
+
+音视频第一版只提供 metadata、音轨和关键帧，没有语音转写。加密 PDF、Office 和压缩包不接受密码，task 会返回明确错误。归档中的路径穿越、符号链接、设备文件、超量条目、压缩炸弹和过深嵌套会被拒绝。未知格式上传返回 `415`，其 `detail.code=unsupported_file_format`。
+
+学习资料流水线仍只支持图片、PDF、DOCX 和 PPTX。EPUB、XLSX、邮件、Notebook、压缩包或音视频若声明为 `homework/note/courseware/exam`，上传会话返回 `422`，其 `detail.code=unsupported_learning_format`。这些文件若只需要 AI 阅读，应使用 `chat_attachment`；若需保留为普通资料但不进入 OCR，则使用 `other`。
+
 
 可用接口：
 
@@ -902,7 +1044,7 @@ POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/generate
 - `verbatim`：只修复可由原图确认的 OCR 转录错误。
 - `spelling`：额外允许错别字/拼写修复。
 - `conceptual`：额外允许有可靠来源的严重概念修正，不改变表达风格。
-- `rewrite`：允许归纳、扩写和改写。
+- `rewrite`：重构整份原稿，而不是逐条搬运 OCR；会合并相关碎片、整理标题和段落、归纳并改写表达，并可使用同一学习单元中与原笔记主题直接相关的可靠资料补全缺失内容。若没有外部可靠资料，只重构原稿已有事实，不凭模型常识扩写。
 
 四档排版语义：
 
@@ -912,6 +1054,28 @@ POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/generate
 - `reflow`：允许重新设计版式。
 
 策略在 task 创建时固化。服务端会校验 Note IR 的逐块来源、代码缩进、公式、表格、箭头/圈选关系和纠错证据；客户端无需信任模型自行遵守策略。
+
+`rewrite` 的资料补全只在用户主动生成或重生成笔记时执行。后端使用原稿标题、OCR 和已有知识点检索同 LearningUnit 的课件、知识块、答案/rubric、作业题目及评分知识点；作业题目只用于发现缺失主题，学生答案和 provisional 评分不能单独作为事实来源。无关内容不会被塞进笔记，每个补充 block 都必须有有效来源。
+
+渲染后的补充段落会显示轻量“资料补充”标记，客户端不要自行追加或移除。若需要展示来源，可从笔记 JSON 读取：
+
+```ts
+type EvidenceSupplementBlock = {
+  origin: "evidence_supplement";
+  source_refs: Array<{
+    evidence_id: string;
+    document_id?: string;
+    knowledge_chunk_id?: string;
+    question_id?: string;
+    page_index?: number;
+    block_id?: string;
+    relevance_score?: number;
+  }>;
+  supplement_reason: string;
+};
+```
+
+笔记版本 metadata 会提供 `completion_count`、`completion_source_document_ids`、`completion_evidence_revision` 和 `completion_strategy`。前端只负责展示；上传课件或作业仍只更新知识库和缺口建议，不会自动改写已有笔记。BGE-M3 暂时不可用时生成任务会重试，而不是返回缺少补全内容的“成功”笔记。
 
 ### Continuous Multi-Image Notes
 
@@ -1014,9 +1178,55 @@ POST /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{latest_ve
 GET  /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/latest
 ```
 
-优先在 sandboxed WebView 加载 `download_urls.rendered_html`；它会套用版本化 CSS，并可能包含服务端签名渲染的低置信原稿裁剪。不要自行执行 fragment 中的脚本或外部资源。手工编辑创建新版本；高亮只更新最新版本。历史超限删除是异步的，UI 不应假设版本号连续。
+### Flashcard Review Hints
 
-图片 note 同时使用 OCR 和原图：OCR 是文字基线，原图用于确认代码、公式、圈选/箭头及布局。模型不支持多模态时会 OCR-only 完成。课件知识库只能作为概念纠错证据，不会被悄悄写入笔记；缺失内容通过 gap UI 由用户确认。
+`GET /api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/flashcard-decks/latest` and historical deck detail responses include a structured `review_hint` on every card:
+
+```json
+{
+  "priority_score": 0.72,
+  "review_hint": {
+    "primary": {
+      "code": "recently_improving",
+      "message_key": "flashcards.hints.recently_improving",
+      "tone": "positive",
+      "params": {"correct_streak": 3}
+    },
+    "badges": [
+      {
+        "code": "historical_errors",
+        "message_key": "flashcards.badges.historical_errors",
+        "tone": "neutral",
+        "params": {"count": 4}
+      }
+    ],
+    "data_quality": "complete"
+  }
+}
+```
+
+The backend returns codes and parameters rather than display text. Localize `message_key` in the client and interpolate `params`. Recommended examples:
+
+| key | zh-CN | en |
+| --- | --- | --- |
+| `flashcards.hints.recently_improving` | 最近连续答对 {correct_streak} 次，正在进步 | Improving: {correct_streak} correct in a row |
+| `flashcards.hints.just_missed` | 最近这类题有失误，建议趁热复习 | Recently missed; review while it is fresh |
+| `flashcards.hints.frequent_recent_errors` | 近 {window_days} 天错了 {count} 次 | {count} misses in the last {window_days} days |
+| `flashcards.hints.recently_correct` | 最近做对过，适合巩固 | Recently correct; reinforce it |
+| `flashcards.hints.from_notes` | 来自笔记的核心知识点 | Key point from your notes |
+| `flashcards.hints.historical_review` | 以前容易出错，建议复习 | Review due to earlier mistakes |
+| `flashcards.hints.general_review` | 建议复习 | Suggested review |
+
+Badge keys are `flashcards.badges.correct_streak`, `recent_errors`, `historical_errors`, and `latest_outcome`. Show the primary hint in the recommendation area and at most three compact badges. Unknown keys must fall back to “建议复习” / “Suggested review”. `data_quality=legacy` means the historical deck predates the complete statistics snapshot; do not combine it with live attempt data in the client. A new grading result creates a new deck, so hints and priority naturally refresh together.
+
+优先在 sandboxed WebView 加载 `download_urls.rendered_html`；它会按版本套用不可变主题。历史版本保留原主题，新生成和完成确定性重排的版本使用 `notepatch-paper-v4`，客户端必须以 `rendering.theme_id/css_url` 为准，不要硬编码主题。Note IR 中的受限 Markdown 已由后端转换为段落、列表、标题、表格和代码 HTML；客户端不得再次执行 Markdown 解析。页面不会自动嵌入、裁剪或复制用户上传的原图/DocTr 矫正图，也不要自行执行 fragment 中的脚本或外部资源。手工编辑创建新版本；高亮只更新最新版本。历史超限删除是异步的，UI 不应假设版本号连续。
+
+图片 note 同时使用 OCR 和 DocTr 矫正图：OCR 是文字事实基线，`deskewed_image` 用于确认代码、公式、圈选/箭头及布局。后端不会把原始上传图作为文档 Skill 的 `image_url`；矫正 artifact 缺失时会自动补跑 DocTr，失败则重试且不会偷偷回退原图。只有模型明确不支持多模态时才会 OCR-only 完成。非 `rewrite` 模式下课件知识库只用于概念纠错，缺失内容通过 gap UI 由用户确认；`rewrite` 模式则允许把同主题且有权威来源的内容作为带标记的资料补充写入新版本。
+
+前端无需新增参数或调用 DocTr。可在 workflow/task events 中展示 `ai_visual_deskewed_reused`、`ai_visual_deskewed_regeneration_started`、`ai_visual_deskewed_regenerated` 和 `ai_visual_deskewed_original_missing` 的通用进度或错误摘要。普通 AI 聊天附件不属于文档 Skill，仍按用户原图发送和显示。
+
+
+笔记本来源标识规则：当 `content_edit_level=verbatim` 时，客户端应预期学校、公司、制造商等印刷文字仍被忠实保留；`spelling/conceptual/rewrite` 模式会自动排除这些非学习内容。排除记录只用于审计，不需要客户端参与判断；如管理端展示结构化 JSON，可读取 `excluded_source_blocks`。客户端不要自行按“学校”“公司”等关键词过滤正文，避免误删真实学习内容。
 
 ### Workflow Tracking
 
@@ -1351,7 +1561,7 @@ GET /workspaces/{workspace_id}/workflows/{workflow_run_id}/events/stream
 GET /workspaces/{workspace_id}/documents/{document_id}/workflow
 ```
 
-详情响应为 `{ workflow, tasks }`，每个 task 项带 `stage/phase/required/task`。`core_status=succeeded` 表示 OCR、知识库或评分等核心结果已可用；增强流程失败时总状态是 `partially_succeeded`，不要把核心结果显示成整体失败。`waiting_until` 用于笔记 5 分钟防抖和 task 延迟重试。
+详情响应为 `{ workflow, tasks }`，每个 task 项带 `stage/phase/required/task`。`core_status=succeeded` 表示 OCR、知识库或评分等核心结果已可用；增强流程失败时总状态是 `partially_succeeded`，不要把核心结果显示成整体失败。电子笔记在 OCR 和知识库完成后立即排队；`waiting_until` 仅用于 task 延迟重试或尚未完成的连续多图 NoteSet，不再表示固定 5 分钟防抖。
 
 Workflow SSE 的事件名为 `workflow_event`，`data` 是完整 `WorkflowEvent`；使用 `sequence_no` 作为 `Last-Event-ID`。收到 `done` 后停止重连。鉴权、断线续传和 heartbeat 处理与 Task SSE 相同。
 
@@ -1369,6 +1579,14 @@ POST /workspaces/{workspace_id}/learning-units/{target_id}/merge
 接口返回异步 `TaskRead`，客户端按 Task Polling 章节跟踪。
 
 展示学习笔记时，优先使用 `download_urls.rendered_html`，不要优先渲染原始 `html` 或 `highlighted_html`。该短期签名页面会选择可用的最新高亮 fragment，加载版本化 NotePatch paper CSS，并设置严格 CSP；过期后重新请求 URL。原始 HTML fragment 只供可信编辑器使用，客户端不要追加任意样式或执行其中内容。
+
+富文本编辑器保存字号时必须提交受控 class，不要提交内联 `style`：
+
+```html
+<span class="np-font-size-24">文字</span>
+```
+
+后端只保留 `np-font-size-12/14/17/20/24/28/32/40`；`style="font-size: 24px"`、其他字号 class 和任意样式都会被 sanitizer 删除。手工 revision 保存后应重新读取服务端返回的笔记版本，不要继续使用未清洗的本地 HTML。加载主题时必须原样保留 `rendering.css_url` 的查询参数（例如 `?v=20260822-font-sizes`），不能去掉版本参数或自行拼接 CSS 地址，否则客户端可能继续命中不含字号规则的旧缓存。历史笔记不被改写；只有已保存受控 class 的新修订才能跨刷新和跨客户端保留字号。
 
 ## Public Random-Prefix Gateway
 

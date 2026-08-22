@@ -6,6 +6,10 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from notepatch.modules.ai.services.image_naming import (
+    schedule_image_remark,
+    schedule_image_remark_ocr,
+)
 from notepatch.modules.documents.models.document import (
     AUTO_LEARNING_DOCUMENT_KINDS,
     Document,
@@ -14,6 +18,9 @@ from notepatch.modules.documents.models.document import (
 from notepatch.modules.documents.ocr import OcrPipeline
 from notepatch.modules.documents.services.doctr import DocTrClient
 from notepatch.modules.documents.services.converter import DocumentConverterClient
+from notepatch.modules.documents.services.visual_preparation import (
+    DocumentVisualPreparationService,
+)
 from notepatch.modules.documents.services.task_support import (
     _auto_learning_enabled,
     _complete_ocr_artifacts,
@@ -75,9 +82,13 @@ def process_document_pipeline(
                 storage.download_file(source_artifact.bucket, source_artifact.object_key, source_path)
             elif document.file_type == "image" and get_settings().doctr_enabled:
                 try:
-                    source_artifact = _doctr_preprocess(
-                        db, tasks, task, document, storage, doctr_client, gpu_lease
-                    )
+                    source_artifact = DocumentVisualPreparationService(
+                        db=db,
+                        tasks=tasks,
+                        storage=storage,
+                        doctr_client=doctr_client,
+                        gpu_lease=gpu_lease,
+                    ).rectify_document(task, document)
                     deskewed_key = source_artifact.object_key
                     source_path = workdir / "deskewed_image.png"
                     storage.download_file(source_artifact.bucket, source_artifact.object_key, source_path)
@@ -100,12 +111,20 @@ def process_document_pipeline(
             )
     downstream = []
     tasks.ensure_active(task)
+    remark_task = schedule_image_remark(
+        db,
+        tasks,
+        document,
+        ocr_text_artifact=artifacts["ocr_text"],
+    )
     if _auto_learning_enabled(task):
         downstream = learning.schedule_after_ocr(
             document=document,
             ocr_artifacts=artifacts,
             force_reprocess=force,
         )
+    if remark_task is not None:
+        downstream.append(remark_task)
     _set_document_status(db, tasks, task, document, "ready")
     tasks.mark_succeeded(
         task,
@@ -179,12 +198,20 @@ def process_ocr_document(
             )
     downstream = []
     tasks.ensure_active(task)
+    remark_task = schedule_image_remark(
+        db,
+        tasks,
+        document,
+        ocr_text_artifact=artifacts["ocr_text"],
+    )
     if _auto_learning_enabled(task):
         downstream = learning.schedule_after_ocr(
             document=document,
             ocr_artifacts=artifacts,
             force_reprocess=force,
         )
+    if remark_task is not None:
+        downstream.append(remark_task)
     _set_document_status(db, tasks, task, document, "ready")
     tasks.mark_succeeded(
         task,
@@ -309,68 +336,6 @@ def _run_and_store_ocr(
     return result.to_dict(), created
 
 
-def _doctr_preprocess(
-    db: Session,
-    tasks: TaskService,
-    task: Task,
-    document: Document,
-    storage: StorageService,
-    client: DocTrClient,
-    gpu_lease: GpuLeaseService,
-) -> DocumentArtifact:
-    _progress(db, tasks, task, "doctr_health", "DocTr health check started", 10)
-    health = client.health()
-    tasks.ensure_active(task)
-    if not health.get("weights_ready", False):
-        raise RetryableTaskError("DocTr model weights are not ready")
-    with tempfile.TemporaryDirectory(prefix=f"notepatch-doctr-{task.id}-") as tmpdir:
-        workdir = Path(tmpdir)
-        source = workdir / f"original{Path(document.original_filename).suffix or '.img'}"
-        output = workdir / "deskewed_image.png"
-        storage.download_file(document.bucket, document.object_key, source)
-        _progress(db, tasks, task, "doctr_running", "DocTr image rectification running", 30)
-        with gpu_lease.lease(
-            owner=f"task:{task.id}:doctr",
-            event_callback=lambda event, data: _gpu_event(db, tasks, task, event, data),
-        ):
-            client.rectify_image(
-                source,
-                output,
-                filename=document.original_filename,
-                content_type=document.mime_type,
-                ill_rec=get_settings().doctr_ill_rec,
-            )
-        tasks.ensure_active(task)
-        artifact_id = str(uuid.uuid4())
-        key = storage.document_artifact_key(
-            task.workspace_id, document.id, artifact_id, "deskewed_image", "png"
-        )
-        storage.put_file(
-            document.bucket,
-            key,
-            output,
-            content_type="image/png",
-            metadata={"processor": "doctr", "task_id": task.id},
-        )
-        tasks.ensure_active(task)
-        artifact = DocumentArtifact(
-            id=artifact_id,
-            workspace_id=task.workspace_id,
-            document_id=document.id,
-            artifact_type="deskewed_image",
-            bucket=document.bucket,
-            object_key=key,
-            mime_type="image/png",
-            file_size=output.stat().st_size,
-            metadata_={"processor": "doctr", "task_id": task.id, "health": health},
-        )
-        db.add(artifact)
-        db.commit()
-    _progress(db, tasks, task, "doctr_succeeded", "DocTr image rectification completed", 45)
-    return artifact
-
-
-
 def _prepare_converted_pdf(
     db: Session,
     tasks: TaskService,
@@ -443,7 +408,6 @@ def process_scan_document(
     from notepatch.platform.database import utcnow
     from notepatch.platform.errors import PermanentTaskError
     from notepatch.platform.metrics import SCAN_RESULTS
-
     tasks.ensure_active(task)
     document = _required_task_document(db, task)
     if document.scan_status == "clean" and document.sha256 and document.detected_mime_type:
@@ -490,6 +454,7 @@ def process_scan_document(
             if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
                 document.status = "ready"
                 db.commit()
+        schedule_image_remark_ocr(db, tasks, document)
         tasks.mark_succeeded(
             task,
             {
@@ -578,6 +543,7 @@ def process_scan_document(
         if document.document_kind not in AUTO_LEARNING_DOCUMENT_KINDS:
             document.status = "ready"
             db.commit()
+    schedule_image_remark_ocr(db, tasks, document)
     tasks.mark_succeeded(
         task,
         {

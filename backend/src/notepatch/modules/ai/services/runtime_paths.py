@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from datetime import datetime
@@ -40,6 +41,10 @@ class OpenClawRuntimePaths:
 
     def container_name(self, user_id: str) -> str:
         return f"notepatch-openclaw-{self.safe_user_id(user_id)}"
+
+    def sandbox_container_prefix(self, user_id: str) -> str:
+        digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+        return f"notepatch-sbx-{digest}-"
 
     def gateway_url(self, user_id: str) -> str:
         return f"http://{self.container_name(user_id)}:18789"

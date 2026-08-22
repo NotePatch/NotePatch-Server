@@ -106,29 +106,8 @@ class StudyNoteService:
                 )
                 uploaded.append(ir_key)
             note_metadata = {**(latest.metadata_ or {}), "manual_revision": True}
-            copied_assets = {}
-            for index, (asset_id, asset) in enumerate(
-                ((latest.metadata_ or {}).get("visual_assets") or {}).items()
-            ):
-                source_key = asset.get("object_key") if isinstance(asset, dict) else None
-                if not source_key:
-                    continue
-                target_key = StorageService.learning_unit_note_key(
-                    workspace_id,
-                    learning_unit_id,
-                    version_id,
-                    f"source-fragment-revision-{index}",
-                    "png",
-                )
-                self.storage.copy_object(
-                    self.storage.bucket,
-                    source_key,
-                    self.storage.bucket,
-                    target_key,
-                )
-                uploaded.append(target_key)
-                copied_assets[asset_id] = {**asset, "object_key": target_key}
-            note_metadata["visual_assets"] = copied_assets
+            note_metadata.pop("visual_assets", None)
+            note_metadata["source_images_embedded"] = False
             note = StudyNoteVersion(
                 id=version_id,
                 workspace_id=workspace_id,

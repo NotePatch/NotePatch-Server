@@ -97,7 +97,8 @@ class NoteSchedulingOperations:
             if history_limit is not None
             else owner.note_history_limit if owner is not None else 3
         )
-        run_at = utcnow() + timedelta(seconds=settings.study_note_debounce_seconds)
+        debounce_seconds = max(0, settings.study_note_debounce_seconds)
+        run_at = utcnow() + timedelta(seconds=debounce_seconds)
         service = TaskService(self.db)
         queued = self.db.scalar(
             select(Task)
@@ -114,17 +115,30 @@ class NoteSchedulingOperations:
         payload = {
             "learning_unit_id": unit.id,
             "expected_knowledge_revision": unit.knowledge_revision,
+            "expected_attempt_revision": unit.attempt_revision,
             "reason": reason,
             "content_edit_level": content_level,
             "layout_edit_level": layout_level,
             "history_limit": max(0, min(100, int(retained_history))),
         }
-        unit.note_generation_due_at = run_at
+        unit.note_generation_due_at = run_at if debounce_seconds else None
         if queued is not None:
             queued.payload = payload
+            if debounce_seconds == 0:
+                if not service.enqueue_task_now(queued):
+                    raise RuntimeError("Could not queue study note generation")
+                return queued
             if not service.schedule_task_at(queued, run_at):
                 raise RuntimeError("Could not reschedule study note generation")
             return queued
+        if debounce_seconds == 0:
+            return service.create_task(
+                workspace_id=unit.workspace_id,
+                task_type="generate_study_notes",
+                resource_type="learning_unit",
+                resource_id=unit.id,
+                payload=payload,
+            )
         task = service.create_delayed_task(
             workspace_id=unit.workspace_id,
             task_type="generate_study_notes",
@@ -135,4 +149,3 @@ class NoteSchedulingOperations:
         )
         self.db.refresh(unit)
         return task
-

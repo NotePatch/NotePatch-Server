@@ -58,6 +58,8 @@ class AdminDocumentListItem(BaseModel):
     uploaded_by: str
     uploaded_by_email: str | None = None
     title: str | None = None
+    remark: str | None = None
+    remark_source: str | None = None
     original_filename: str
     mime_type: str | None = None
     file_size: int | None = None

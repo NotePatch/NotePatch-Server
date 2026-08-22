@@ -15,6 +15,7 @@ from notepatch.modules.learning.services.html_notes import sanitize_note_html
 from notepatch.modules.learning.services.workflow import LearningWorkflowService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.task import TaskService
+from notepatch.platform.config import get_settings
 from notepatch.platform.database import utcnow
 from tests.conftest import FakeRedis, auth_headers, first_workspace_id, register_user
 
@@ -65,6 +66,18 @@ def test_note_html_sanitizer_preserves_theme_and_removes_active_content():
     assert 'data-knowledge-point-id="kp-1"' in cleaned
 
 
+def test_note_html_sanitizer_preserves_supported_font_size_classes_only():
+    cleaned = sanitize_note_html(
+        '<p><span class="np-font-size-24" style="font-size:40px">Large</span>'
+        '<span class="np-font-size-18">Unsupported</span></p>'
+    )
+    assert 'class="np-font-size-24"' in cleaned
+    assert "style=" not in cleaned
+    assert "np-font-size-18" not in cleaned
+    assert "Large" in cleaned
+    assert "Unsupported" in cleaned
+
+
 def test_flashcard_priority_rewards_recent_errors_and_recent_correct_streak_reduces_weight(db_sessionmaker):
     now = utcnow()
     with db_sessionmaker() as db:
@@ -103,6 +116,11 @@ def test_flashcard_priority_rewards_recent_errors_and_recent_correct_streak_redu
         )[0]
         assert after["priority_score"] < before["priority_score"]
         assert after["priority_factors"]["recent_correct_streak"] == 3
+        assert after["priority_factors"]["attempt_count"] == 7
+        assert after["priority_factors"]["recent_error_count_30d"] == 2
+        assert after["priority_factors"]["recent_correct_count_14d"] == 3
+        assert after["priority_factors"]["latest_outcome"] == "correct"
+        assert after["priority_factors"]["latest_attempt_at"]
 
         db.add(
             KnowledgePointAttempt(
@@ -123,6 +141,36 @@ def test_flashcard_priority_rewards_recent_errors_and_recent_correct_streak_redu
         assert latest_error["priority_factors"]["recent_correct_streak"] == 0
 
 
+
+
+def test_partial_attempt_counts_as_error_pressure_and_recent_miss(db_sessionmaker):
+    now = utcnow()
+    with db_sessionmaker() as db:
+        unit, point, note = _seed_note(db, "workspace-partial")
+        db.add(
+            KnowledgePointAttempt(
+                workspace_id=unit.workspace_id,
+                learning_unit_id=unit.id,
+                knowledge_point_id=point.id,
+                outcome="partial",
+                score_ratio=0.5,
+                occurred_at=now,
+                metadata_={},
+            )
+        )
+        db.commit()
+        result = FlashcardPriorityService(db).calculate(
+            workspace_id=unit.workspace_id,
+            learning_unit_id=unit.id,
+            note=note,
+            now=now,
+        )[0]
+        factors = result["priority_factors"]
+        assert factors["error_pressure"] == 0.5
+        assert factors["success_pressure"] == 0.5
+        assert factors["historical_error_count"] == 1
+        assert factors["recent_error_count_30d"] == 1
+        assert factors["latest_outcome"] == "partial"
 
 
 def test_attempt_revision_refreshes_under_lock(db_sessionmaker):
@@ -149,6 +197,7 @@ def test_attempt_revision_refreshes_under_lock(db_sessionmaker):
 
 
 def test_study_note_debounce_reuses_and_reschedules_one_task(client, db_sessionmaker, monkeypatch):
+    monkeypatch.setattr(get_settings(), "study_note_debounce_seconds", 300)
     user = register_user(client, "note-debounce@example.com")
     workspace_id = first_workspace_id(client, user["access_token"])
     fake_redis = FakeRedis()
@@ -168,6 +217,33 @@ def test_study_note_debounce_reuses_and_reschedules_one_task(client, db_sessionm
         assert second.next_attempt_at >= first_due
         assert not any(fake_redis.lists.values())
         assert sum(len(items) for items in fake_redis.zsets.values()) == 1
+
+
+def test_study_note_generation_is_queued_immediately_by_default(
+    client, db_sessionmaker, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "study_note_debounce_seconds", 0)
+    user = register_user(client, "note-immediate@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(
+        "notepatch.modules.tasks.services.task.redis.from_url",
+        lambda *_args, **_kwargs: fake_redis,
+    )
+    with db_sessionmaker() as db:
+        unit = LearningUnit(workspace_id=workspace_id, title="Immediate", knowledge_revision=1)
+        db.add(unit)
+        db.commit()
+
+        task = LearningWorkflowService(db).schedule_study_notes(
+            unit, reason="knowledge_base_completed"
+        )
+
+        assert task.status == "queued"
+        assert task.next_attempt_at is None
+        assert unit.note_generation_due_at is None
+        assert task.id in next(iter(fake_redis.lists.values()))
+        assert not any(fake_redis.zsets.values())
 
 
 
@@ -241,6 +317,16 @@ def test_flashcard_deck_apis_are_workspace_scoped(client, db_sessionmaker):
     assert latest.status_code == 200, latest.text
     assert latest.json()["deck"]["id"] == deck_id
     assert latest.json()["cards"][0]["priority_factors"]["base"] == 1.0
+    assert latest.json()["cards"][0]["review_hint"] == {
+        "primary": {
+            "code": "from_notes",
+            "message_key": "flashcards.hints.from_notes",
+            "tone": "neutral",
+            "params": {},
+        },
+        "badges": [],
+        "data_quality": "legacy",
+    }
     assert client.get(
         f"/api/v1/workspaces/{bob_workspace}/learning-units/{unit_id}/flashcard-decks/{deck_id}",
         headers=auth_headers(bob["access_token"]),

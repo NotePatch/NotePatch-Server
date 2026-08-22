@@ -3,11 +3,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
+import pytest
 from sqlalchemy import select
 
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunnerError
 from notepatch.modules.ai.services.skill_runner import OpenClawSkillRunner
-from notepatch.modules.ai.services.visual_attachments import VisualAttachmentBuilder
+from notepatch.modules.ai.services.visual_attachments import (
+    CorrectedVisualAttachmentError,
+    VisualAttachmentBuilder,
+)
 from notepatch.modules.learning.schemas.learning import StudyNoteVersionRead
 from notepatch.modules.learning.schemas.skills import QuestionExtractionResult
 from notepatch.modules.learning.services.content_operations import LearningContentOperations
@@ -34,10 +38,10 @@ def _make_image(path: Path, *, image_format: str = "PNG", size: tuple[int, int] 
 def test_visual_attachment_builder_uses_direct_images_and_task_local_tiff_preview(tmp_path):
     input_dir = tmp_path / "input"
     documents_dir = input_dir / "documents"
-    png_path = documents_dir / "png-note" / "original" / "note.png"
-    tiff_path = documents_dir / "tiff-note" / "original" / "note.tiff"
+    png_path = documents_dir / "png-note" / "artifacts" / "deskewed-png.png"
+    tiff_path = documents_dir / "tiff-note" / "artifacts" / "deskewed-tiff.png"
     _make_image(png_path)
-    _make_image(tiff_path, image_format="TIFF")
+    _make_image(tiff_path)
     runtime = {
         "host_task_input_dir": str(input_dir),
         "documents_root_path": "/workspace/notepatch/openclaw/tasks/task/input/documents",
@@ -48,7 +52,10 @@ def test_visual_attachment_builder_uses_direct_images_and_task_local_tiff_previe
                 "title": "PNG note",
                 "mime_type": "image/png",
                 "file_type": "image",
-                "original_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/png-note/original/note.png",
+                "original_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/png-note/original/must-not-be-used.png",
+                "deskewed_image_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/png-note/artifacts/deskewed-png.png",
+                "deskewed_artifact_id": "artifact-png",
+                "deskewed_mime_type": "image/png",
             },
             "tiff-note": {
                 "document_id": "tiff-note",
@@ -56,20 +63,46 @@ def test_visual_attachment_builder_uses_direct_images_and_task_local_tiff_previe
                 "title": "TIFF note",
                 "mime_type": "image/tiff",
                 "file_type": "image",
-                "original_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/tiff-note/original/note.tiff",
+                "original_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/tiff-note/original/must-not-be-used.tiff",
+                "deskewed_image_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/tiff-note/artifacts/deskewed-tiff.png",
+                "deskewed_artifact_id": "artifact-tiff",
+                "deskewed_mime_type": "image/tiff",
             },
         },
     }
 
     direct = VisualAttachmentBuilder().build(runtime, ["png-note"])
     assert direct.used_previews is False
-    assert direct.attachments[0]["original_path"].endswith("/png-note/original/note.png")
+    assert direct.attachments[0]["original_path"].endswith("/png-note/artifacts/deskewed-png.png")
+    assert direct.attachments[0]["filename"] == "deskewed-png-note.png"
+    assert direct.attachments[0]["source_variant"] == "doctr_deskewed"
+    assert direct.attachments[0]["artifact_id"] == "artifact-png"
 
     converted = VisualAttachmentBuilder().build(runtime, ["png-note", "tiff-note"])
     assert converted.used_previews is True
     assert converted.document_ids == ["png-note", "tiff-note"]
     assert all(item["mime_type"] == "image/jpeg" for item in converted.attachments)
     assert all("/.visual-previews/" in item["original_path"] for item in converted.attachments)
+
+
+def test_visual_attachment_builder_never_falls_back_to_original(tmp_path):
+    input_dir = tmp_path / "input"
+    original_path = input_dir / "documents" / "note" / "original" / "note.png"
+    _make_image(original_path)
+    runtime = {
+        "host_task_input_dir": str(input_dir),
+        "documents_root_path": "/workspace/notepatch/openclaw/tasks/task/input/documents",
+        "document_contexts": {
+            "note": {
+                "document_id": "note",
+                "file_type": "image",
+                "original_path": "/workspace/notepatch/openclaw/tasks/task/input/documents/note/original/note.png",
+            }
+        },
+    }
+
+    with pytest.raises(CorrectedVisualAttachmentError, match="Corrected visual path"):
+        VisualAttachmentBuilder().build(runtime, ["note"])
 
 
 def test_visual_note_selection_uses_latest_eight_eligible_images():
@@ -92,10 +125,20 @@ class VisualRuntimeStub:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def sync_workspace_documents(self, *, db, storage, workspace_id, task_id, model_ids=None):
+    def sync_workspace_documents(
+        self,
+        *,
+        db,
+        storage,
+        workspace_id,
+        task_id,
+        model_ids=None,
+        corrected_visual_document_ids=None,
+    ):
+        assert corrected_visual_document_ids == {"image-note"}
         input_dir = self.root / task_id / "input"
         output_dir = self.root / task_id / "output"
-        image_path = input_dir / "documents" / "image-note" / "original" / "note.png"
+        image_path = input_dir / "documents" / "image-note" / "artifacts" / "deskewed.png"
         _make_image(image_path)
         output_dir.mkdir(parents=True, exist_ok=True)
         container_root = f"/workspace/notepatch/openclaw/tasks/{task_id}/input/documents"
@@ -117,10 +160,19 @@ class VisualRuntimeStub:
                     "title": "Image note",
                     "mime_type": "image/png",
                     "file_type": "image",
-                    "original_path": f"{container_root}/image-note/original/note.png",
+                    "original_path": None,
+                    "deskewed_image_path": f"{container_root}/image-note/artifacts/deskewed.png",
+                    "deskewed_artifact_id": "artifact-image-note",
+                    "deskewed_mime_type": "image/png",
                 }
             },
         }
+
+
+class VisualPreparationStub:
+    def ensure_for_ai(self, task, document_ids):
+        assert document_ids == ["image-note"]
+        return {"image-note": SimpleNamespace(id="artifact-image-note")}
 
 
 class TextOnlyThenSuccessRunner:
@@ -176,6 +228,7 @@ def test_skill_runner_falls_back_only_for_explicit_visual_capability_error(
             storage=fake_storage,
             gateway_runner=runner,
             runtime_service=VisualRuntimeStub(tmp_path),
+            visual_preparation_service=VisualPreparationStub(),
         ).execute(
             task=task,
             skill_name="notepatch_question_extractor",
@@ -200,6 +253,7 @@ def test_skill_runner_payload_supports_real_gateway_image_resolution(tmp_path, f
         storage=fake_storage,
         workspace_id="workspace-1",
         task_id="task-1",
+        corrected_visual_document_ids={"image-note"},
     )
     visual = VisualAttachmentBuilder().build(runtime, ["image-note"])
     payload = OpenClawSkillRunner._request_payload(
@@ -265,7 +319,8 @@ def test_image_note_workflow_records_multimodal_visual_provenance(
             )
 
         assert note is not None
-        assert note.metadata_["theme_id"] == "notepatch-paper-v2"
+        assert note.metadata_["theme_id"] == "notepatch-paper-v4"
+        assert note.metadata_["renderer_revision"] == "note-ir-markdown-v1"
         assert note.metadata_["visual_reference_document_ids"] == [document_id]
         assert note.metadata_["visual_reference_mode"] == "multimodal"
     finally:
@@ -312,4 +367,4 @@ def test_v2_note_theme_and_layout_classes_are_safe(client):
         }
     )
     assert note.rendering.theme_id == "notepatch-paper-v2"
-    assert note.rendering.css_url.endswith("/api/v1/assets/note-themes/notepatch-paper-v2.css")
+    assert "/api/v1/assets/note-themes/notepatch-paper-v2.css?v=" in note.rendering.css_url

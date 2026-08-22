@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.modules.ai.services.gateway import OpenClawRunner
+from notepatch.modules.ai.services.image_naming import process_image_remark
 from notepatch.modules.admin.services.operations import UserPurgeExecutor
 from notepatch.modules.ai.services.task_handler import process_openclaw_chat
 from notepatch.modules.documents.ocr import OcrPipeline
@@ -54,6 +55,7 @@ REGISTERED_TASK_TYPES = {
     "purge_avatar_object",
     "purge_user",
     "openclaw_agent_run",
+    "generate_image_remark",
 }
 
 
@@ -180,6 +182,14 @@ def execute_registered_task(context: TaskExecutionContext) -> None:
         context.db.commit()
         result = UserPurgeExecutor(context.db, context.storage).execute(task)
         context.tasks.mark_succeeded(task, result)
+    elif task.task_type == "generate_image_remark":
+        process_image_remark(
+            context.db,
+            context.tasks,
+            task,
+            context.storage,
+            context.openclaw_runner,
+        )
     elif task.task_type == "openclaw_agent_run":
         process_openclaw_chat(
             context.db,

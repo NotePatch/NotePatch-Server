@@ -73,6 +73,31 @@ class CorrectingRunner:
         return None
 
 
+class DomainCorrectingRunner(CorrectingRunner):
+    def run_task(self, workspace_id, task_id, payload):
+        self.calls.append(payload)
+        output = Path(payload["_openclaw"]["host_task_output_dir"]) / "questions.json"
+        answer = "5" if len(self.calls) == 1 else "4"
+        output.write_text(
+            json.dumps(
+                {
+                    "questions": [
+                        {
+                            "sequence_no": 1,
+                            "question_type": "short_answer",
+                            "prompt": "What is 2 + 2?",
+                            "answer": answer,
+                            "page_refs": [0],
+                            "evidence": f"2 + 2 = {answer}",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {"runner": "test", "answer": "done"}
+
+
 def _task() -> Task:
     return Task(
         id="task-1",
@@ -105,6 +130,35 @@ def test_skill_runner_corrects_invalid_output_in_same_session(db_sessionmaker, f
     skill_input = json.loads((tmp_path / "task-1" / "input" / "input.json").read_text(encoding="utf-8"))
     assert skill_input["_output_contract"]["filename"] == "questions.json"
     assert skill_input["_output_contract"]["json_schema"]["required"] == ["questions"]
+
+
+def test_skill_runner_corrects_domain_invalid_output_in_same_session(
+    db_sessionmaker, fake_storage, tmp_path
+):
+    gateway = DomainCorrectingRunner()
+
+    def validate_answer(result: QuestionExtractionResult) -> None:
+        if result.questions[0].answer != "4":
+            raise ValueError("answer must be supported by the supplied evidence")
+
+    with db_sessionmaker() as db:
+        result, _ = OpenClawSkillRunner(
+            db=db,
+            storage=fake_storage,
+            gateway_runner=gateway,
+            runtime_service=RuntimeStub(tmp_path),
+        ).execute(
+            task=_task(),
+            skill_name="notepatch_question_extractor",
+            input_payload={"ocr_text": "2 + 2 = 4"},
+            output_filename="questions.json",
+            schema=QuestionExtractionResult,
+            output_validator=validate_answer,
+        )
+
+    assert result.questions[0].answer == "4"
+    assert len(gateway.calls) == 2
+    assert "answer must be supported" in gateway.calls[1]["prompt"]
 
 
 def test_skill_runner_rejects_persistently_invalid_output(db_sessionmaker, fake_storage, tmp_path):

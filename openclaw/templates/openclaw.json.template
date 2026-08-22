@@ -4,12 +4,56 @@
       "workspace": __WORKSPACE_DIR_JSON__,
       "model": {"primary": __MODEL_JSON__},
       "skills": __SKILLS_JSON__,
-      "sandbox": {"mode": "all", "workspaceAccess": "rw"}
+      "sandbox": {
+        "mode": "all",
+        "backend": "docker",
+        "scope": "agent",
+        "workspaceAccess": "rw",
+        "docker": {
+          "image": __SANDBOX_IMAGE_JSON__,
+          "containerPrefix": __SANDBOX_CONTAINER_PREFIX_JSON__,
+          "workdir": "/workspace",
+          "readOnlyRoot": true,
+          "tmpfs": ["/tmp", "/var/tmp", "/run"],
+          "network": "none",
+          "user": "1000:1000",
+          "capDrop": ["ALL"],
+          "env": {
+            "LANG": "C.UTF-8",
+            "OPENCLAW_WORKSPACE_ROOT": "/workspace",
+            "OPENCLAW_FILE_PARSE_MAX_FILE_MB": "200",
+            "OPENCLAW_FILE_PARSE_MAX_OUTPUT_MB": "20",
+            "OPENCLAW_ARCHIVE_MAX_ENTRIES": "1000",
+            "OPENCLAW_ARCHIVE_MAX_EXPANDED_MB": "500",
+            "OPENCLAW_ARCHIVE_MAX_RATIO": "100",
+            "OPENCLAW_ARCHIVE_MAX_DEPTH": "3",
+            "OPENCLAW_MEDIA_AUDIO_MAX_SECONDS": "600",
+            "OPENCLAW_FILE_PARSE_TIMEOUT_SECONDS": "180"
+          },
+          "pidsLimit": __SANDBOX_PIDS_LIMIT__,
+          "memory": __SANDBOX_MEMORY_JSON__,
+          "memorySwap": __SANDBOX_MEMORY_JSON__,
+          "cpus": __SANDBOX_CPUS__,
+          "ulimits": {
+            "nofile": {"soft": 1024, "hard": 2048}
+          }
+        },
+        "prune": {"idleHours": 6, "maxAgeDays": 3}
+      }
     }
   },
   "tools": {
-    "allow": ["read", "write", "edit"],
-    "deny": ["exec", "process", "browser", "web_fetch", "web_search"],
+    "allow": ["read", "write", "edit", "exec", "process"],
+    "deny": ["browser", "web_fetch", "web_search", "gateway", "cron", "nodes", "canvas"],
+    "exec": {
+      "host": "sandbox",
+      "security": "full",
+      "ask": "off",
+      "timeoutSec": __SANDBOX_EXEC_TIMEOUT__,
+      "cleanupMs": 300000,
+      "strictInlineEval": true
+    },
+    "elevated": {"enabled": false},
     "fs": {"workspaceOnly": true}
   },
   "models": __MODELS_JSON__

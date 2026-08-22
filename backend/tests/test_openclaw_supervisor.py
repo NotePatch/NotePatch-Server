@@ -28,6 +28,7 @@ class FakeContainer:
         self.started = 0
         self.stopped = 0
         self.removed = False
+        self.attrs = kwargs.get("attrs", {})
 
     def reload(self) -> None:
         return None
@@ -40,7 +41,7 @@ class FakeContainer:
         self.status = "exited"
         self.stopped += 1
 
-    def remove(self) -> None:
+    def remove(self, force: bool = False) -> None:
         self.removed = True
         self.store.pop(self.name, None)
 
@@ -214,6 +215,69 @@ def test_supervisor_recreates_gateway_when_openai_base_url_changes(client, db_se
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert config["models"]["providers"]["openai"]["baseUrl"] == "https://proxy.example.com/v1"
         assert config["models"]["providers"]["openai"]["models"][0]["input"] == ["text", "image"]
+    finally:
+        settings.openai_base_url = old_base_url
+
+
+def test_supervisor_removes_only_the_users_stale_sandbox_on_gateway_rebuild(
+    client, db_sessionmaker
+):
+    settings = get_settings()
+    old_base_url = settings.openai_base_url
+    settings.openai_base_url = None
+    try:
+        user_id, _workspace_id = _registered_user_and_workspace(
+            client, db_sessionmaker, "supervisor-sandbox-cleanup@example.com"
+        )
+        other_user_id, _ = _registered_user_and_workspace(
+            client, db_sessionmaker, "supervisor-sandbox-other@example.com"
+        )
+        docker_client = FakeDockerClient()
+        presence = PresenceService(redis_client=FakeRedis())
+        presence.heartbeat(user_id, "tab-1")
+        _run_supervisor_once(db_sessionmaker, presence, docker_client)
+
+        runtime = OpenClawUserRuntimeService()
+        owned = FakeContainer(
+            docker_client.containers.items,
+            "openclaw-sbx-agent-main-owned",
+            {
+                "labels": {"openclaw.sandbox": "1"},
+                "attrs": {
+                    "Mounts": [
+                        {
+                            "Type": "bind",
+                            "Source": str(runtime.workspace_dir(user_id).resolve()),
+                            "Destination": "/workspace",
+                        }
+                    ]
+                },
+            },
+        )
+        other = FakeContainer(
+            docker_client.containers.items,
+            "openclaw-sbx-agent-main-other",
+            {
+                "labels": {"openclaw.sandbox": "1"},
+                "attrs": {
+                    "Mounts": [
+                        {
+                            "Type": "bind",
+                            "Source": str(runtime.workspace_dir(other_user_id).resolve()),
+                            "Destination": "/workspace",
+                        }
+                    ]
+                },
+            },
+        )
+        docker_client.containers.items[owned.name] = owned
+        docker_client.containers.items[other.name] = other
+
+        settings.openai_base_url = "https://changed.example.com/v1"
+        _run_supervisor_once(db_sessionmaker, presence, docker_client)
+
+        assert owned.removed is True
+        assert other.removed is False
     finally:
         settings.openai_base_url = old_base_url
 

@@ -240,6 +240,50 @@ def test_gateway_runner_uses_conversation_messages_and_augments_only_current_pro
     assert '"subject": "math"' in messages[2]["content"]
 
 
+def test_gateway_runner_injects_preferences_as_low_priority_system_context(openclaw_settings):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    runner = OpenClawGatewayRunner(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    runner.run_task(
+        "workspace-1",
+        "task-preferences",
+        {
+            "prompt": "Explain queues",
+            "input": {},
+            "options": {},
+            "client_locale": "en-US",
+            "ai_preferences": {
+                "version": 1,
+                "completed": True,
+                "answers": {
+                    "response_language": "match_user",
+                    "collaboration_style": "coach",
+                    "response_depth": "detailed",
+                    "response_structure": "steps",
+                    "clarification_policy": "ask_when_ambiguous",
+                    "feedback_tone": "gentle",
+                    "learning_guidance": "hint_first",
+                    "custom_instructions": "Use one practical example.",
+                },
+            },
+        },
+    )
+
+    messages = captured["body"]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "collaboration_style: coach" in messages[0]["content"]
+    assert "current_client_locale: en-US" in messages[0]["content"]
+    assert "binding within the safety" in messages[0]["content"]
+    assert "do not reveal" in messages[0]["content"]
+    assert "final numeric result" in messages[0]["content"]
+    assert "wait for the learner's attempt" in messages[0]["content"]
+    assert messages[1] == {"role": "user", "content": "Explain queues"}
+
+
 def test_gateway_runner_ignores_provider_model_for_gateway_request(openclaw_settings):
     captured: dict = {}
 

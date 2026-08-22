@@ -13,6 +13,7 @@ from notepatch.modules.documents.models.document import Document
 from notepatch.modules.documents.services.purge import DocumentPurgeService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.identity.models.user import User
+from notepatch.modules.identity.services.ai_preferences import AI_ONBOARDING_VERSION, AiPreferenceService
 from notepatch.modules.tasks.services.task import TaskService
 from notepatch.platform.storage import StorageService
 
@@ -38,6 +39,7 @@ class ChatService:
         client_locale: str,
         task_service: TaskService,
     ) -> Task:
+        self._require_onboarding(user)
         conversation = (
             self.get_active_conversation(workspace_id=workspace_id, user_id=user.id, conversation_id=conversation_id)
             if conversation_id
@@ -98,6 +100,19 @@ class ChatService:
             self.db.commit()
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Task queue is unavailable")
         return task
+
+    @staticmethod
+    def _require_onboarding(user: User) -> None:
+        if AiPreferenceService.is_completed(user):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ai_onboarding_required",
+                "version": AI_ONBOARDING_VERSION,
+                "onboarding_url": "/api/v1/auth/ai-onboarding",
+            },
+        )
 
     def get_active_conversation(self, *, workspace_id: str, user_id: str, conversation_id: str) -> ChatConversation:
         conversation = self.db.scalar(
@@ -359,6 +374,7 @@ class ChatService:
         client_locale: str,
         task_service: TaskService,
     ) -> Task:
+        self._require_onboarding(user)
         conversation = self.db.scalar(
             select(ChatConversation)
             .where(

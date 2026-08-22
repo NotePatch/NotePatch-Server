@@ -5,10 +5,20 @@ from notepatch.platform.config import Settings, get_settings
 
 
 DEFAULT_NOTE_THEME_ID = "notepatch-paper-v1"
-CURRENT_NOTE_THEME_ID = "notepatch-paper-v2"
+CURRENT_NOTE_THEME_ID = "notepatch-paper-v4"
+MULTIMODAL_NOTE_THEME_ID = "notepatch-paper-v2"
+EVIDENCE_NOTE_THEME_ID = "notepatch-paper-v3"
 NOTE_THEME_FILES = {
     DEFAULT_NOTE_THEME_ID: "notepatch-paper-v1.css",
-    CURRENT_NOTE_THEME_ID: "notepatch-paper-v2.css",
+    MULTIMODAL_NOTE_THEME_ID: "notepatch-paper-v2.css",
+    EVIDENCE_NOTE_THEME_ID: "notepatch-paper-v3.css",
+    CURRENT_NOTE_THEME_ID: "notepatch-paper-v4.css",
+}
+NOTE_THEME_REVISIONS = {
+    DEFAULT_NOTE_THEME_ID: "20260822-font-sizes",
+    MULTIMODAL_NOTE_THEME_ID: "20260822-font-sizes",
+    EVIDENCE_NOTE_THEME_ID: "20260822-evidence-supplements",
+    CURRENT_NOTE_THEME_ID: "20260822-note-markdown-v1",
 }
 NOTE_THEME_WRAPPER_CLASS = "np-note-theme"
 
@@ -25,7 +35,8 @@ def note_theme_id(note: StudyNoteVersion | None) -> str:
 
 def note_theme_css_path(theme_id: str) -> str:
     normalized = normalize_note_theme_id(theme_id)
-    return f"/api/v1/assets/note-themes/{normalized}.css"
+    revision = NOTE_THEME_REVISIONS[normalized]
+    return f"/api/v1/assets/note-themes/{normalized}.css?v={revision}"
 
 
 def note_theme_css_url(theme_id: str, settings: Settings | None = None) -> str:

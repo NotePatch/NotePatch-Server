@@ -230,6 +230,21 @@ def process_openclaw_chat(
         }
         for item in citations
     ]
+    attachment_files = []
+    for item in input_payload.get("attachments") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("document_id"), str):
+            continue
+        attachment_files.append(
+            {
+                "document_id": item["document_id"],
+                "filename": item.get("filename"),
+                "mime_type": item.get("mime_type"),
+                "file_type": item.get("file_type"),
+                "original_path": item.get("original_path"),
+                "ocr_markdown_path": item.get("ocr_markdown_path"),
+                "ocr_text_path": item.get("ocr_text_path"),
+            }
+        )
     payload = dict(task.payload)
     payload["input"] = input_payload
     payload["conversation_messages"] = chat_service.history_for_task(
@@ -246,6 +261,7 @@ def process_openclaw_chat(
         "task_output_path": runtime["task_output_path"],
         "host_task_input_dir": runtime["host_task_input_dir"],
         "host_task_output_dir": runtime["host_task_output_dir"],
+        "attachment_files": attachment_files,
         "session_key": f"notepatch:{task.workspace_id}:chat:{task.payload.get('conversation_id') or task.id}",
     }
     tasks.ensure_active(task)

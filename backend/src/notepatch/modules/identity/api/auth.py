@@ -18,9 +18,12 @@ from notepatch.platform.security import (
     hash_token,
     verify_password,
 )
-from notepatch.modules.identity.models.user import RefreshToken, User
+from notepatch.modules.identity.models.user import IdentityAuditLog, RefreshToken, User
 from notepatch.modules.identity.models.workspace import Workspace, WorkspaceMember
 from notepatch.modules.identity.schemas.auth import (
+    AiOnboardingRead,
+    AiOnboardingUpdate,
+    AiPreferences,
     LoginRequest,
     LogoutRequest,
     OkResponse,
@@ -32,6 +35,10 @@ from notepatch.modules.identity.schemas.auth import (
     ChangePasswordRequest,
 )
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
+from notepatch.modules.identity.services.ai_preferences import (
+    AI_ONBOARDING_VERSION,
+    AiPreferenceService,
+)
 from notepatch.modules.identity.services.presence import PresenceService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -229,17 +236,93 @@ def change_password(
     return _issue_tokens(db, current_user)
 
 
+@router.get("/ai-onboarding", response_model=AiOnboardingRead)
+def get_ai_onboarding(
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return AiPreferenceService.onboarding_read(current_user)
+
+
+@router.put("/ai-onboarding", response_model=AiOnboardingRead)
+def complete_ai_onboarding(
+    payload: AiOnboardingUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    if payload.version != AI_ONBOARDING_VERSION:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ai_onboarding_version_mismatch",
+                "expected_version": AI_ONBOARDING_VERSION,
+            },
+        )
+    before = AiPreferenceService.resolved_for_user(current_user).model_dump()
+    after = payload.answers.model_dump()
+    changed_fields = sorted(key for key in after if before.get(key) != after.get(key))
+    was_completed = AiPreferenceService.is_completed(current_user)
+    previous_version = current_user.ai_onboarding_version
+    current_user.ai_preferences = after
+    current_user.ai_onboarding_version = AI_ONBOARDING_VERSION
+    current_user.ai_onboarding_completed_at = current_user.ai_onboarding_completed_at or utcnow()
+    if changed_fields or not was_completed:
+        db.add(
+            IdentityAuditLog(
+                actor_user_id=current_user.id,
+                action="ai_onboarding_completed" if not was_completed else "ai_preferences_updated",
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                before_data={"version": previous_version},
+                after_data={
+                    "version": AI_ONBOARDING_VERSION,
+                    "changed_fields": changed_fields,
+                },
+                result="succeeded",
+            )
+        )
+    db.commit()
+    db.refresh(current_user)
+    return AiPreferenceService.onboarding_read(current_user)
+
+
 @router.patch("/preferences", response_model=UserRead)
 def update_preferences(
     payload: UserPreferencesUpdate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> User:
-    updates = payload.model_dump(exclude_unset=True, exclude_none=True)
-    if not updates:
+    updates = payload.model_dump(exclude_unset=True, exclude={"ai_preferences"})
+    updates = {key: value for key, value in updates.items() if value is not None}
+    ai_patch = payload.ai_preferences
+    changed_ai_fields: list[str] = []
+    if ai_patch is not None:
+        patch_values = ai_patch.model_dump(exclude_unset=True)
+        if patch_values:
+            merged = AiPreferenceService.resolved_for_user(current_user).model_dump()
+            merged.update(patch_values)
+            current_user.ai_preferences = AiPreferences.model_validate(merged).model_dump()
+            changed_ai_fields = sorted(patch_values)
+    if not updates and not changed_ai_fields:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one preference is required")
     for field, value in updates.items():
         setattr(current_user, field, value)
+    if changed_ai_fields:
+        db.add(
+            IdentityAuditLog(
+                actor_user_id=current_user.id,
+                action="ai_preferences_updated",
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                before_data={"version": current_user.ai_onboarding_version},
+                after_data={
+                    "version": current_user.ai_onboarding_version,
+                    "changed_fields": changed_ai_fields,
+                },
+                result="succeeded",
+            )
+        )
     db.commit()
     db.refresh(current_user)
     return current_user

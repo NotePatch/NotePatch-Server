@@ -56,6 +56,8 @@ class DocumentRead(ORMModel):
     workspace_id: str
     uploaded_by: str
     title: str | None = None
+    remark: str | None = None
+    remark_source: str | None = None
     original_filename: str
     mime_type: str | None = None
     file_size: int | None = None
@@ -79,6 +81,11 @@ class DocumentRead(ORMModel):
     purge_task_id: str | None = None
     purged_at: datetime | None = None
     latest_workflow_run_id: str | None = None
+    ai_image_name: str | None = None
+    ai_image_naming_status: str | None = None
+    ai_image_naming_task_id: str | None = None
+    image_remark_status: str | None = None
+    image_remark_task_id: str | None = None
     metadata: dict = metadata_field()
     created_at: datetime
     updated_at: datetime
@@ -107,6 +114,7 @@ class UploadSessionRequest(BaseModel):
     document_kind: DocumentKind = "other"
     save_to_documents: bool = True
     title: str | None = Field(default=None, max_length=255)
+    remark: str | None = Field(default=None, max_length=255)
     learning_unit_id: str | None = None
     learning_unit_title: str | None = Field(default=None, max_length=255)
     subject: str | None = Field(default=None, max_length=64)
@@ -121,12 +129,29 @@ class UploadSessionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_retention_scope(self):
+        if self.remark is not None:
+            normalized = " ".join(self.remark.split())
+            if not normalized:
+                raise ValueError("remark must not be blank")
+            self.remark = normalized
         if not self.save_to_documents and self.document_kind != "chat_attachment":
             raise ValueError("save_to_documents=false is only valid for chat_attachment uploads")
         if self.note_set_id is not None and self.document_kind != "note":
             raise ValueError("note_set_id is only valid for note documents")
         if (self.note_set_id is None) != (self.page_index is None):
             raise ValueError("note_set_id and page_index must be provided together")
+        return self
+
+
+class DocumentRemarkUpdate(BaseModel):
+    remark: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def normalize_remark(self):
+        normalized = " ".join(self.remark.split())
+        if not normalized:
+            raise ValueError("remark must not be blank")
+        self.remark = normalized
         return self
 
 

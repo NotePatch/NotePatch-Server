@@ -26,6 +26,7 @@ TASK_TYPES = {
     "scan_document",
     "merge_learning_units",
     "assign_learning_unit",
+    "generate_image_remark",
 }
 TASK_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
 

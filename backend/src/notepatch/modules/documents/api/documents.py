@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from notepatch.entrypoints.deps import get_current_user, get_storage_service, get_task_service, get_workspace_member
 from notepatch.platform.database import get_db
+from notepatch.platform.database import utcnow
 from notepatch.modules.documents.models.document import CHAT_ATTACHMENT_KIND, Document, DocumentArtifact
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.documents.models.upload import UploadSession
@@ -14,6 +15,7 @@ from notepatch.modules.documents.schemas.document import (
     DownloadUrlResponse,
     DocumentDeleteResponse,
     DocumentRead,
+    DocumentRemarkUpdate,
     OcrArtifactRead,
     OcrArtifactsResponse,
     ProcessDocumentRequest,
@@ -75,6 +77,7 @@ def create_upload_session(
         document_kind=payload.document_kind,
         save_to_documents=payload.save_to_documents,
         title=payload.title,
+        remark=payload.remark,
         metadata={
             **payload.metadata,
             **({"learning_unit_id": payload.learning_unit_id} if payload.learning_unit_id else {}),
@@ -165,6 +168,39 @@ def get_document(
     storage: StorageService = Depends(get_storage_service),
 ) -> Document:
     return DocumentService(db, storage).get_document(workspace_id, document_id)
+
+
+@router.patch("/{document_id}", response_model=DocumentRead)
+def update_document_remark(
+    workspace_id: str,
+    document_id: str,
+    payload: DocumentRemarkUpdate,
+    member: WorkspaceMember = Depends(get_workspace_member),
+    db: Session = Depends(get_db),
+    storage: StorageService = Depends(get_storage_service),
+    task_service: TaskService = Depends(get_task_service),
+) -> Document:
+    _require_document_write(member)
+    document = DocumentService(db, storage).get_document(workspace_id, document_id)
+    document.remark = payload.remark
+    document.remark_source = "user"
+    metadata = dict(document.metadata_ or {})
+    state = dict(metadata.get("image_remark_generation") or {})
+    state.update({"status": "user", "edited_at": utcnow().isoformat()})
+    state.pop("error", None)
+    metadata["image_remark_generation"] = state
+    document.metadata_ = metadata
+    active = task_service.find_active_task(
+        workspace_id=workspace_id,
+        task_type="generate_image_remark",
+        resource_type="document",
+        resource_id=document.id,
+    )
+    if active is not None:
+        task_service.request_cancel(active, "Image remark was edited by the user", commit=False)
+    db.commit()
+    db.refresh(document)
+    return document
 
 
 @router.delete(

@@ -120,6 +120,8 @@ def _document_item(db: Session, document: Document) -> AdminDocumentListItem:
         uploaded_by=document.uploaded_by,
         uploaded_by_email=uploader.email if uploader else None,
         title=document.title,
+        remark=document.remark,
+        remark_source=document.remark_source,
         original_filename=document.original_filename,
         mime_type=document.mime_type,
         file_size=document.file_size,

@@ -50,12 +50,11 @@ def render_study_note(
         fragment = storage.get_text_artifact(object_key, bucket=storage.bucket)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Study note content not found") from exc
-    fragment = renderer.inject_visual_assets(note, fragment, storage)
     return HTMLResponse(
         renderer.wrap_html(note, fragment),
         headers={
             "Cache-Control": "private, no-store",
-            "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src data:; font-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'none'; font-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
         },

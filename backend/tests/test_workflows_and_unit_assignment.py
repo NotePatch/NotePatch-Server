@@ -359,6 +359,66 @@ def test_shared_downstream_task_links_multiple_workflows(db_sessionmaker):
         assert {link.workflow_run_id for link in links} == {run.id for run in runs}
 
 
+def test_learning_unit_enrichment_task_auto_links_all_pending_workflows(db_sessionmaker):
+    with db_sessionmaker() as db:
+        from notepatch.modules.identity.models.user import User
+        from notepatch.modules.identity.models.workspace import Workspace
+
+        user = User(email="workflow-auto-share@example.com", password_hash="hash")
+        db.add(user)
+        db.flush()
+        workspace = Workspace(name="Personal", type="personal", owner_user_id=user.id)
+        db.add(workspace)
+        db.flush()
+        unit = LearningUnit(workspace_id=workspace.id, title="Shared notes")
+        db.add(unit)
+        db.flush()
+        tracker = WorkflowTracker(db)
+        runs = []
+        for index in range(2):
+            document = Document(
+                workspace_id=workspace.id,
+                uploaded_by=user.id,
+                original_filename=f"note-{index}.png",
+                file_type="image",
+                document_kind="note",
+                storage_backend="seaweedfs",
+                bucket="test",
+                object_key=(
+                    f"workspaces/{workspace.id}/documents/{index}/original/file.png"
+                ),
+                status="ready",
+                metadata_={"learning_unit_id": unit.id},
+            )
+            db.add(document)
+            db.flush()
+            run = tracker.create_for_document(
+                document,
+                user_id=user.id,
+                trigger_type="upload",
+                waiting_upload=False,
+            )
+            run.learning_unit_id = unit.id
+            run.status = "waiting"
+            run.core_status = "succeeded"
+            run.enrichment_status = "waiting"
+            runs.append(run)
+        db.flush()
+
+        child = NoQueueTaskService(db).create_task(
+            workspace_id=workspace.id,
+            task_type="generate_study_notes",
+            resource_type="learning_unit",
+            resource_id=unit.id,
+            payload={"learning_unit_id": unit.id},
+        )
+
+        links = db.scalars(
+            select(WorkflowTaskLink).where(WorkflowTaskLink.task_id == child.id)
+        ).all()
+        assert {link.workflow_run_id for link in links} == {run.id for run in runs}
+
+
 def test_workflow_reports_waiting_then_partial_success(db_sessionmaker):
     with db_sessionmaker() as db:
         from notepatch.modules.identity.models.user import User

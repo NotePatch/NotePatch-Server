@@ -5,11 +5,17 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from notepatch.platform.errors import RetryableTaskError
+
 
 MAX_VISUAL_ATTACHMENTS = 8
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
 DIRECT_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
+class CorrectedVisualAttachmentError(RetryableTaskError):
+    """A prepared DocTr artifact could not be attached from the task snapshot."""
 
 
 @dataclass(frozen=True)
@@ -25,13 +31,15 @@ class VisualAttachmentBuilder:
 
     def build(self, runtime: dict, document_ids: list[str]) -> VisualAttachmentBuildResult:
         requested_ids = list(dict.fromkeys(document_ids))[-MAX_VISUAL_ATTACHMENTS:]
+        if not requested_ids:
+            return VisualAttachmentBuildResult([], [], [], False)
         contexts = runtime.get("document_contexts")
         host_input_dir = runtime.get("host_task_input_dir")
         container_documents_root = runtime.get("documents_root_path")
         if not isinstance(contexts, dict) or not isinstance(host_input_dir, str):
-            return VisualAttachmentBuildResult([], [], self._skip_all(requested_ids, "snapshot_unavailable"), False)
+            raise CorrectedVisualAttachmentError("Corrected visual snapshot is unavailable")
         if not isinstance(container_documents_root, str):
-            return VisualAttachmentBuildResult([], [], self._skip_all(requested_ids, "snapshot_unavailable"), False)
+            raise CorrectedVisualAttachmentError("Corrected visual snapshot is unavailable")
 
         host_documents_root = (Path(host_input_dir) / "documents").resolve()
         container_root = PurePosixPath(container_documents_root)
@@ -40,39 +48,45 @@ class VisualAttachmentBuilder:
         for document_id in requested_ids:
             context = contexts.get(document_id)
             if not isinstance(context, dict) or context.get("file_type") != "image":
-                skipped.append({"document_id": document_id, "reason": "image_context_unavailable"})
-                continue
-            original_path = context.get("original_path")
-            if not isinstance(original_path, str):
-                skipped.append({"document_id": document_id, "reason": "image_path_unavailable"})
-                continue
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual context is unavailable for document {document_id}"
+                )
+            deskewed_path = context.get("deskewed_image_path")
+            if not isinstance(deskewed_path, str):
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual path is unavailable for document {document_id}"
+                )
             try:
-                relative_path = PurePosixPath(original_path).relative_to(container_root)
-            except ValueError:
-                skipped.append({"document_id": document_id, "reason": "image_path_outside_snapshot"})
-                continue
+                relative_path = PurePosixPath(deskewed_path).relative_to(container_root)
+            except ValueError as exc:
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual path is outside the task snapshot for document {document_id}"
+                ) from exc
             source_path = (host_documents_root / Path(*relative_path.parts)).resolve()
             if not source_path.is_relative_to(host_documents_root):
-                skipped.append({"document_id": document_id, "reason": "image_path_outside_snapshot"})
-                continue
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual path is outside the task snapshot for document {document_id}"
+                )
             if not source_path.is_file():
-                skipped.append({"document_id": document_id, "reason": "image_snapshot_missing"})
-                continue
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual snapshot is missing for document {document_id}"
+                )
             if not self._is_decodable_image(source_path):
-                skipped.append({"document_id": document_id, "reason": "image_decode_failed"})
-                continue
+                raise CorrectedVisualAttachmentError(
+                    f"Corrected visual snapshot is not a valid image for document {document_id}"
+                )
             candidates.append((context, source_path))
 
         if not candidates:
-            return VisualAttachmentBuildResult([], [], skipped, False)
+            raise CorrectedVisualAttachmentError("No corrected visual attachments were prepared")
 
         direct_sizes = [path.stat().st_size for _, path in candidates]
         direct_compatible = all(
-            context.get("mime_type") in DIRECT_IMAGE_MIME_TYPES and size <= MAX_IMAGE_BYTES
+            context.get("deskewed_mime_type") in DIRECT_IMAGE_MIME_TYPES and size <= MAX_IMAGE_BYTES
             for (context, _), size in zip(candidates, direct_sizes, strict=True)
         )
         if direct_compatible and sum(direct_sizes) <= MAX_TOTAL_BYTES:
-            attachments = [self._attachment(context, context["original_path"]) for context, _ in candidates]
+            attachments = [self._attachment(context, context["deskewed_image_path"]) for context, _ in candidates]
             return VisualAttachmentBuildResult(
                 attachments,
                 [item["document_id"] for item in attachments],
@@ -89,14 +103,15 @@ class VisualAttachmentBuilder:
             preview_path = preview_dir / f"{document_id}.jpg"
             try:
                 self._write_preview(source_path, preview_path, per_image_budget)
-            except (OSError, UnidentifiedImageError, ValueError):
-                skipped.append({"document_id": document_id, "reason": "preview_generation_failed"})
-                continue
+            except (OSError, UnidentifiedImageError, ValueError) as exc:
+                raise CorrectedVisualAttachmentError(
+                    f"Could not generate a corrected visual preview for document {document_id}"
+                ) from exc
             container_preview_path = str(container_root / ".visual-previews" / preview_path.name)
             preview_context = {
                 **context,
-                "filename": f"visual-{document_id}.jpg",
-                "mime_type": "image/jpeg",
+                "filename": f"deskewed-{document_id}.jpg",
+                "deskewed_mime_type": "image/jpeg",
             }
             attachments.append(self._attachment(preview_context, container_preview_path))
 
@@ -109,14 +124,17 @@ class VisualAttachmentBuilder:
 
     @staticmethod
     def _attachment(context: dict, path: str) -> dict:
+        extension = ".jpg" if context.get("deskewed_mime_type") == "image/jpeg" else ".png"
         return {
             "document_id": context["document_id"],
-            "filename": context.get("filename") or f"{context['document_id']}.jpg",
+            "filename": f"deskewed-{context['document_id']}{extension}",
             "title": context.get("title"),
-            "mime_type": context.get("mime_type") or "image/jpeg",
+            "mime_type": context.get("deskewed_mime_type") or "image/png",
             "file_type": "image",
             "original_path": path,
             "purpose": "layout_reference",
+            "source_variant": "doctr_deskewed",
+            "artifact_id": context.get("deskewed_artifact_id"),
         }
 
     @staticmethod
@@ -150,6 +168,8 @@ class VisualAttachmentBuilder:
         destination.unlink(missing_ok=True)
         raise ValueError("Could not fit visual preview within the gateway byte budget")
 
-    @staticmethod
-    def _skip_all(document_ids: list[str], reason: str) -> list[dict]:
-        return [{"document_id": document_id, "reason": reason} for document_id in document_ids]
+__all__ = [
+    "CorrectedVisualAttachmentError",
+    "VisualAttachmentBuilder",
+    "VisualAttachmentBuildResult",
+]

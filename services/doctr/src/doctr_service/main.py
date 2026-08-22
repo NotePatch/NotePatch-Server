@@ -29,7 +29,7 @@ def healthz() -> dict:
 
 
 @app.post("/v1/rectify")
-async def rectify(file: UploadFile = File(...), ill_rec: bool = Form(True)) -> Response:
+async def rectify(file: UploadFile = File(...), ill_rec: bool = Form(False)) -> Response:
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     await file.close()
     if len(data) > MAX_UPLOAD_BYTES:

@@ -8,7 +8,7 @@ x-backend: &backend
     args:
       RELEASE_REVISION: ${GIT_SHA:-dev}
       RELEASE_BUILD_TIME: ${BUILD_TIME:-unknown}
-      SCHEMA_REVISION: 202608220001
+      SCHEMA_REVISION: 202608220003
   env_file:
     - path: .env
       required: false
@@ -173,6 +173,25 @@ services:
       redis:
         condition: service_healthy
 
+  openclaw-sandbox-image:
+    profiles: ["tools"]
+    image: ${OPENCLAW_SANDBOX_IMAGE:-notepatch-openclaw-sandbox:filetools-v1}
+    build:
+      context: .
+      dockerfile: infra/docker/openclaw-sandbox.Dockerfile
+    command: ["notepatch-file", "self-test"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   docserver:
     build:
       context: .
@@ -280,7 +299,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       RESTIC_REPOSITORY: /backups/restic
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:-change-me-restic-password}
-      SCHEMA_REVISION: 202608220001
+      SCHEMA_REVISION: 202608220003
       RELEASE_REVISION: ${GIT_SHA:-dev}
     volumes:
       - ${NOTEPATCH_DATA_ROOT:-/home/usr/notepatch-data}/backups:/backups

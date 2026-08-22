@@ -65,11 +65,27 @@ class DocumentScanner:
         if detected in {"application/zip", "application/octet-stream"} and zipfile.is_zipfile(path):
             try:
                 with zipfile.ZipFile(path) as archive:
-                    names = set(archive.namelist())
+                    members = archive.infolist()
+                    if any(member.flag_bits & 0x1 for member in members):
+                        raise DocumentScanError("Password-protected files are not supported")
+                    names = {member.filename for member in members}
                 if any(name.startswith("word/") for name in names):
                     return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 if any(name.startswith("ppt/") for name in names):
                     return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                if any(name.startswith("xl/") for name in names):
+                    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                if "mimetype" in names:
+                    with zipfile.ZipFile(path) as archive:
+                        package_mime = archive.read("mimetype").decode("ascii", errors="ignore").strip()
+                    allowed_packages = {
+                        "application/epub+zip",
+                        "application/vnd.oasis.opendocument.text",
+                        "application/vnd.oasis.opendocument.presentation",
+                        "application/vnd.oasis.opendocument.spreadsheet",
+                    }
+                    if package_mime in allowed_packages:
+                        return package_mime
             except (OSError, zipfile.BadZipFile):
                 pass
         return detected

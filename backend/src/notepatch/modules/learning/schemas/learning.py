@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
+from notepatch.modules.learning.services.flashcard_hints import build_flashcard_review_hint
 from notepatch.modules.learning.services.note_themes import (
     DEFAULT_NOTE_THEME_ID,
     NOTE_THEME_WRAPPER_CLASS,
@@ -128,6 +129,19 @@ class LearningUnitMergeRequest(BaseModel):
     source_learning_unit_ids: list[str] = Field(min_length=1, max_length=50)
 
 
+class FlashcardHintItem(BaseModel):
+    code: str
+    message_key: str
+    tone: Literal["positive", "warning", "neutral"]
+    params: dict = Field(default_factory=dict)
+
+
+class FlashcardReviewHint(BaseModel):
+    primary: FlashcardHintItem
+    badges: list[FlashcardHintItem] = Field(default_factory=list, max_length=3)
+    data_quality: Literal["complete", "legacy"]
+
+
 class FlashcardRead(ORMModel):
     id: str
     knowledge_point_id: str
@@ -139,6 +153,11 @@ class FlashcardRead(ORMModel):
     difficulty: str | None = None
     rank: int
     created_at: datetime
+
+    @computed_field
+    @property
+    def review_hint(self) -> FlashcardReviewHint:
+        return FlashcardReviewHint.model_validate(build_flashcard_review_hint(self.priority_factors))
 
 
 class FlashcardDeckRead(ORMModel):

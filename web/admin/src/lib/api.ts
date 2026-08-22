@@ -62,13 +62,27 @@ export type FlashcardDeck = {
   created_at: string;
 };
 
+export type FlashcardHintItem = {
+  code: string;
+  message_key: string;
+  tone: "positive" | "warning" | "neutral";
+  params: Record<string, string | number | boolean | null>;
+};
+
+export type FlashcardReviewHint = {
+  primary: FlashcardHintItem;
+  badges: FlashcardHintItem[];
+  data_quality: "complete" | "legacy";
+};
+
 export type Flashcard = {
   id: string;
   knowledge_point_id: string;
   front: string;
   back: string;
   priority_score: number;
-  priority_factors: Record<string, number>;
+  priority_factors: Record<string, unknown>;
+  review_hint: FlashcardReviewHint;
   rank: number;
 };
 

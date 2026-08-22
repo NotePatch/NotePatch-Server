@@ -38,7 +38,7 @@ class DocTrClient:
         *,
         filename: str,
         content_type: str | None = None,
-        ill_rec: bool = True,
+        ill_rec: bool = False,
     ) -> None:
         path = Path(file_path)
         output = Path(output_path)

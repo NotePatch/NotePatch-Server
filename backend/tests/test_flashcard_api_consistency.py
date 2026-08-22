@@ -57,6 +57,7 @@ def _seed_unit(db, workspace_id: str, user_id: str, *, title: str, subject: str 
 def test_every_supported_task_type_has_a_registered_handler():
     assert TASK_TYPES == REGISTERED_TASK_TYPES
     assert OPENCLAW_BACKED_TASK_TYPES == {
+        "generate_image_remark",
         "openclaw_agent_run",
         *(LEARNING_TASK_TYPES - {"detect_note_gaps", "purge_study_note_history"}),
     }

@@ -38,6 +38,9 @@ ALLOWED_TAGS = {
     "figure",
     "figcaption",
 }
+NOTE_FONT_SIZES = (12, 14, 17, 20, 24, 28, 32, 40)
+NOTE_FONT_SIZE_CLASSES = {f"np-font-size-{size}" for size in NOTE_FONT_SIZES}
+
 ALLOWED_CLASSES = {
     "np-note",
     "np-note-header",
@@ -65,6 +68,9 @@ ALLOWED_CLASSES = {
     "np-annotation-marker",
     "np-source-block",
     "np-source-fragment",
+    "np-evidence-supplement",
+    "np-supplement-badge",
+    *NOTE_FONT_SIZE_CLASSES,
 }
 KNOWLEDGE_POINT_ATTRIBUTE = re.compile(r'data-knowledge-point-id="([^"]+)"')
 
@@ -75,7 +81,13 @@ def sanitize_note_html(value: str) -> str:
         tags=ALLOWED_TAGS,
         clean_content_tags={"script", "style", "iframe", "object", "embed", "svg", "math"},
         attributes={
-            "*": {"id", "data-knowledge-point-id", "data-note-asset-id", "data-language"},
+            "*": {
+                "id",
+                "data-knowledge-point-id",
+                "data-note-asset-id",
+                "data-language",
+                "data-note-block-id",
+            },
             "th": {"colspan", "rowspan", "scope"},
             "td": {"colspan", "rowspan"},
         },

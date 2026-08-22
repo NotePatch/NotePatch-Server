@@ -39,6 +39,7 @@ def test_register_generates_openclaw_user_runtime(client):
         "notepatch_note_highlighter",
         "notepatch_flashcards",
         "notepatch_note_supplement",
+        "notepatch_file_reader",
     }
     for skill in expected_skills:
         skill_path = root / "workspace" / "skills" / skill / "SKILL.md"
@@ -65,7 +66,22 @@ def test_register_generates_openclaw_user_runtime(client):
     assert config["agents"]["defaults"]["sandbox"]["mode"] == "all"
     assert config["agents"]["defaults"]["sandbox"]["workspaceAccess"] == "rw"
     assert set(config["agents"]["defaults"]["skills"]) == expected_skills
-    assert config["tools"]["allow"] == ["read", "write", "edit"]
+    sandbox = config["agents"]["defaults"]["sandbox"]
+    assert sandbox["scope"] == "agent"
+    assert sandbox["docker"]["image"] == get_settings().openclaw_sandbox_image
+    assert sandbox["docker"]["containerPrefix"] == service.sandbox_container_prefix(user_id)
+    assert sandbox["docker"]["network"] == "none"
+    assert sandbox["docker"]["readOnlyRoot"] is True
+    assert config["tools"]["allow"] == ["read", "write", "edit", "exec", "process"]
+    assert config["tools"]["exec"] == {
+        "host": "sandbox",
+        "security": "full",
+        "ask": "off",
+        "timeoutSec": get_settings().openclaw_sandbox_exec_timeout_seconds,
+        "cleanupMs": 300000,
+        "strictInlineEval": True,
+    }
+    assert config["tools"]["elevated"] == {"enabled": False}
     providers = (config.get("models") or {}).get("providers") or {}
     assert "baseUrl" not in providers.get("openai", {})
     assert auth_profiles["profiles"]["openai:default"]["keyRef"] == {
@@ -78,6 +94,25 @@ def test_register_generates_openclaw_user_runtime(client):
     assert f"container_name: ${{OPENCLAW_CONTAINER_NAME:-notepatch-openclaw-{user_id}}}" in (
         root / "docker-compose.yml"
     ).read_text(encoding="utf-8")
+
+
+def test_openclaw_runtime_uses_distinct_sandbox_prefixes_per_user(client):
+    first = register_user(client, "sandbox-prefix-first@example.com")
+    second = register_user(client, "sandbox-prefix-second@example.com")
+    service = OpenClawUserRuntimeService()
+
+    first_config = json.loads(
+        service.openclaw_json_path(first["user"]["id"]).read_text(encoding="utf-8")
+    )
+    second_config = json.loads(
+        service.openclaw_json_path(second["user"]["id"]).read_text(encoding="utf-8")
+    )
+    first_prefix = first_config["agents"]["defaults"]["sandbox"]["docker"]["containerPrefix"]
+    second_prefix = second_config["agents"]["defaults"]["sandbox"]["docker"]["containerPrefix"]
+
+    assert first_prefix.startswith("notepatch-sbx-")
+    assert second_prefix.startswith("notepatch-sbx-")
+    assert first_prefix != second_prefix
 
 
 def test_openclaw_runtime_provisioning_is_idempotent(client, db_sessionmaker):
@@ -189,9 +224,15 @@ def test_openclaw_runtime_writes_openai_base_url_from_env(client):
         assert config["models"]["providers"]["openai"]["baseUrl"] == "https://proxy.example.com/v1"
         model_id = settings.openclaw_agent_model.removeprefix("openai/")
         title_model_id = settings.ai_chat_title_model.removeprefix("openai/")
+        image_naming_model_id = settings.ai_image_remark_model.removeprefix("openai/")
         assert config["models"]["providers"]["openai"]["models"] == [
             {"id": model_id, "name": model_id, "input": ["text", "image"]},
             {"id": title_model_id, "name": title_model_id, "input": ["text", "image"]},
+            {
+                "id": image_naming_model_id,
+                "name": image_naming_model_id,
+                "input": ["text", "image"],
+            },
         ]
         assert "OPENAI_API_KEY" not in json.dumps(config)
     finally:
@@ -544,3 +585,94 @@ def test_openclaw_document_sync_fails_for_non_not_found_storage_errors(client, d
                 workspace_id=workspace_id,
                 task_id="task-storage-error",
             )
+
+
+
+def test_corrected_visual_snapshot_excludes_original_image_paths(
+    client, db_sessionmaker, fake_storage
+):
+    user = register_user(client, "openclaw-corrected-snapshot@example.com")
+    workspace_id = first_workspace_id(client, user["access_token"])
+    upload = _create_upload_session(client, user["access_token"], workspace_id, "note.png")
+    document_id = upload["document"]["id"]
+    fake_storage.objects[(upload["bucket"], upload["object_key"])] = {
+        "file_size": 12,
+        "mime_type": "image/png",
+        "metadata": {},
+        "body": b"original-image",
+    }
+    original_artifact_id = str(uuid.uuid4())
+    original_artifact_key = fake_storage.document_artifact_key(
+        workspace_id, document_id, original_artifact_id, "original", "png"
+    )
+    deskewed_artifact_id = str(uuid.uuid4())
+    deskewed_artifact_key = fake_storage.document_artifact_key(
+        workspace_id, document_id, deskewed_artifact_id, "deskewed_image", "png"
+    )
+    fake_storage.objects[(upload["bucket"], original_artifact_key)] = {
+        "file_size": 12,
+        "mime_type": "image/png",
+        "metadata": {},
+        "body": b"original-artifact",
+    }
+    fake_storage.objects[(upload["bucket"], deskewed_artifact_key)] = {
+        "file_size": 13,
+        "mime_type": "image/png",
+        "metadata": {"processor": "doctr"},
+        "body": b"corrected-png",
+    }
+
+    with db_sessionmaker() as db:
+        document = db.get(Document, document_id)
+        document.status = "uploaded"
+        document.file_type = "image"
+        document.mime_type = "image/png"
+        db.add_all(
+            [
+                DocumentArtifact(
+                    id=original_artifact_id,
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                    artifact_type="original",
+                    bucket=upload["bucket"],
+                    object_key=original_artifact_key,
+                    mime_type="image/png",
+                    file_size=12,
+                    metadata_={},
+                ),
+                DocumentArtifact(
+                    id=deskewed_artifact_id,
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                    artifact_type="deskewed_image",
+                    bucket=upload["bucket"],
+                    object_key=deskewed_artifact_key,
+                    mime_type="image/png",
+                    file_size=13,
+                    metadata_={"processor": "doctr"},
+                ),
+            ]
+        )
+        db.commit()
+        context = OpenClawUserRuntimeService().sync_workspace_documents(
+            db=db,
+            storage=fake_storage,
+            workspace_id=workspace_id,
+            task_id="task-corrected-only",
+            corrected_visual_document_ids={document_id},
+        )
+
+    document_context = context["document_contexts"][document_id]
+    assert document_context["original_path"] is None
+    assert document_context["deskewed_artifact_id"] == deskewed_artifact_id
+    assert document_context["deskewed_image_path"].endswith(".png")
+    index = json.loads(
+        (Path(context["host_task_input_dir"]) / "documents" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    mirrored = index["documents"][0]
+    assert mirrored["original_path"] is None
+    assert "original" not in {artifact["artifact_type"] for artifact in mirrored["artifacts"]}
+    original_dir = Path(context["host_task_input_dir"]) / "documents" / document_id / "original"
+    assert list(original_dir.iterdir()) == []

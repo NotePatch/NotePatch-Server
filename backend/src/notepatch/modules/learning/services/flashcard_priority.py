@@ -57,6 +57,11 @@ class FlashcardPriorityService:
             "success_multiplier": self.settings.flashcard_success_multiplier,
             "correct_streak_multiplier": self.settings.flashcard_correct_streak_multiplier,
             "max_correct_streak": self.settings.flashcard_max_correct_streak,
+            "hint_error_window_days": self.settings.flashcard_hint_error_window_days,
+            "hint_success_window_days": self.settings.flashcard_hint_success_window_days,
+            "hint_fresh_attempt_days": self.settings.flashcard_hint_fresh_attempt_days,
+            "hint_frequent_error_count": self.settings.flashcard_hint_frequent_error_count,
+            "hint_improving_streak": self.settings.flashcard_hint_improving_streak,
         }
 
     def _score(
@@ -68,6 +73,11 @@ class FlashcardPriorityService:
     ) -> dict:
         error_pressure = 0.0
         success_pressure = 0.0
+        recent_error_count = 0
+        recent_correct_count = 0
+        historical_error_count = 0
+        latest_error_at = None
+        latest_correct_at = None
         for attempt in attempts:
             occurred_at = attempt.occurred_at
             if occurred_at.tzinfo is None:
@@ -79,6 +89,15 @@ class FlashcardPriorityService:
             success_pressure += attempt.score_ratio * math.pow(
                 2.0, -age_days / self.settings.flashcard_success_half_life_days
             )
+            if attempt.outcome in {"incorrect", "partial"}:
+                historical_error_count += 1
+                latest_error_at = latest_error_at or occurred_at
+                if age_days <= self.settings.flashcard_hint_error_window_days:
+                    recent_error_count += 1
+            if attempt.outcome == "correct":
+                latest_correct_at = latest_correct_at or occurred_at
+                if age_days <= self.settings.flashcard_hint_success_window_days:
+                    recent_correct_count += 1
         correct_streak = 0
         for attempt in attempts:
             if attempt.outcome != "correct":
@@ -107,9 +126,28 @@ class FlashcardPriorityService:
             "attempt_count": len(attempts),
             "source_document_ids": point.source_document_ids or [],
             "priority_factors": {
+                "hint_data_version": 1,
+                "snapshot_at": _iso(now),
                 "base": base,
+                "in_note": in_note,
                 "error_pressure": round(error_pressure, 6),
                 "success_pressure": round(success_pressure, 6),
+                "attempt_count": len(attempts),
+                "historical_error_count": historical_error_count,
+                "recent_error_count_30d": recent_error_count,
+                "recent_correct_count_14d": recent_correct_count,
                 "recent_correct_streak": correct_streak,
+                "latest_outcome": attempts[0].outcome if attempts else None,
+                "latest_attempt_at": _iso(attempts[0].occurred_at) if attempts else None,
+                "latest_error_at": _iso(latest_error_at),
+                "latest_correct_at": _iso(latest_correct_at),
             },
         }
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()

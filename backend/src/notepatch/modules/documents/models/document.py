@@ -57,6 +57,8 @@ class Document(Base):
     )
     uploaded_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remark_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -96,6 +98,34 @@ class Document(Base):
     @property
     def save_to_documents(self) -> bool:
         return self.retention_scope == "workspace"
+
+    @property
+    def ai_image_name(self) -> str | None:
+        return self.remark if self.file_type == "image" else None
+
+    @property
+    def ai_image_naming_status(self) -> str | None:
+        value = (self.metadata_ or {}).get("image_remark_generation")
+        if not isinstance(value, dict):
+            value = (self.metadata_ or {}).get("ai_image_naming")
+        naming_status = value.get("status") if isinstance(value, dict) else None
+        return naming_status if isinstance(naming_status, str) and naming_status else None
+
+    @property
+    def ai_image_naming_task_id(self) -> str | None:
+        value = (self.metadata_ or {}).get("image_remark_generation")
+        if not isinstance(value, dict):
+            value = (self.metadata_ or {}).get("ai_image_naming")
+        task_id = value.get("task_id") if isinstance(value, dict) else None
+        return task_id if isinstance(task_id, str) and task_id else None
+
+    @property
+    def image_remark_status(self) -> str | None:
+        return self.ai_image_naming_status
+
+    @property
+    def image_remark_task_id(self) -> str | None:
+        return self.ai_image_naming_task_id
 
 
 class DocumentArtifact(Base):

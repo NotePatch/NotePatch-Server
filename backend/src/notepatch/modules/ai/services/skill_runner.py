@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from notepatch.modules.tasks.models.task import Task
+from notepatch.modules.documents.services.doctr import DocTrClient
+from notepatch.modules.documents.services.visual_preparation import (
+    DocumentVisualPreparationService,
+)
 from notepatch.platform.config import get_settings
 from notepatch.platform.errors import RetryableTaskError
 from notepatch.modules.ai.services.gateway import OpenClawGatewayRunner, OpenClawRunner, OpenClawRunnerError
+from notepatch.modules.identity.services.ai_preferences import AiPreferenceService
 from notepatch.modules.ai.services.model_selection import AiModelSelectionService
 from notepatch.modules.ai.services.runtime import NOTEPATCH_SKILLS, OpenClawUserRuntimeService
 from notepatch.modules.ai.services.visual_attachments import VisualAttachmentBuilder
 from notepatch.platform.storage import StorageService
+from notepatch.platform.gpu_lease import GpuLeaseService
 from notepatch.modules.tasks.services.task import TaskService
 
 
@@ -33,12 +39,22 @@ class OpenClawSkillRunner:
         storage: StorageService,
         gateway_runner: OpenClawRunner,
         runtime_service: OpenClawUserRuntimeService | None = None,
+        doctr_client: DocTrClient | None = None,
+        gpu_lease: GpuLeaseService | None = None,
+        visual_preparation_service: DocumentVisualPreparationService | None = None,
     ) -> None:
         self.db = db
         self.storage = storage
         self.gateway_runner = gateway_runner
         self.runtime = runtime_service or OpenClawUserRuntimeService()
         self.settings = get_settings()
+        self.visual_preparation = visual_preparation_service or DocumentVisualPreparationService(
+            db=db,
+            tasks=TaskService(db),
+            storage=storage,
+            doctr_client=doctr_client or DocTrClient(),
+            gpu_lease=gpu_lease or GpuLeaseService(),
+        )
 
     def execute(
         self,
@@ -49,10 +65,28 @@ class OpenClawSkillRunner:
         output_filename: str,
         schema: type[ResultT],
         visual_document_ids: list[str] | None = None,
+        output_validator: Callable[[ResultT], None] | None = None,
     ) -> tuple[ResultT, dict]:
         if skill_name not in NOTEPATCH_SKILLS:
             raise ValueError(f"Unsupported OpenClaw skill: {skill_name}")
         tasks = TaskService(self.db)
+        preference_service = AiPreferenceService(self.db)
+        original_preferences = (task.payload or {}).get("ai_preferences")
+        task.payload = preference_service.snapshot_payload(
+            task.workspace_id,
+            task.task_type,
+            task.payload,
+        )
+        if original_preferences is None and isinstance(task.payload.get("ai_preferences"), dict):
+            tasks.add_event(
+                task,
+                "ai_preferences_selected",
+                "AI presentation preferences selected for task",
+                data={
+                    "version": task.payload["ai_preferences"].get("version"),
+                    "domain": skill_name,
+                },
+            )
         model_selection = AiModelSelectionService(self.db)
         provider_model, model_snapshotted = model_selection.resolve_for_task(task)
         if model_snapshotted:
@@ -69,13 +103,18 @@ class OpenClawSkillRunner:
         if isinstance(self.gateway_runner, OpenClawGatewayRunner):
             model_selection.ensure_credentials(provider_model)
         tasks.ensure_active(task)
-        runtime = self.runtime.sync_workspace_documents(
-            db=self.db,
-            storage=self.storage,
-            workspace_id=task.workspace_id,
-            task_id=task.id,
-            model_ids=(provider_model,),
-        )
+        visual_document_ids = list(dict.fromkeys(visual_document_ids or []))
+        prepared_visuals = self.visual_preparation.ensure_for_ai(task, visual_document_ids)
+        runtime_options = {
+            "db": self.db,
+            "storage": self.storage,
+            "workspace_id": task.workspace_id,
+            "task_id": task.id,
+            "model_ids": (provider_model,),
+        }
+        if prepared_visuals:
+            runtime_options["corrected_visual_document_ids"] = set(prepared_visuals)
+        runtime = self.runtime.sync_workspace_documents(**runtime_options)
         task.payload = {
             **(task.payload or {}),
             "mirrored_document_ids": runtime.get("mirrored_document_ids", []),
@@ -87,15 +126,30 @@ class OpenClawSkillRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         input_path = input_dir / "input.json"
         output_path = output_dir / output_filename
-        visual = VisualAttachmentBuilder().build(runtime, visual_document_ids or [])
+        visual = VisualAttachmentBuilder().build(runtime, visual_document_ids)
         visual_state = {
             "selection_policy": "latest_8_image_notes",
-            "requested_document_ids": list(visual_document_ids or []),
+            "requested_document_ids": visual_document_ids,
             "document_ids": visual.document_ids,
+            "artifact_ids": {
+                attachment["document_id"]: attachment["artifact_id"]
+                for attachment in visual.attachments
+            },
+            "source_variant": "doctr_deskewed" if visual.document_ids else None,
             "skipped": visual.skipped,
             "used_previews": visual.used_previews,
             "mode": "multimodal" if visual.attachments else "none",
         }
+        visual_records = [
+            {
+                "document_id": attachment["document_id"],
+                "artifact_id": attachment["artifact_id"],
+                "source_variant": attachment["source_variant"],
+                "preview_generated": visual.used_previews,
+            }
+            for attachment in visual.attachments
+        ]
+        visual_state["items"] = visual_records
         if visual_document_ids:
             tasks.add_event(
                 task,
@@ -106,6 +160,9 @@ class OpenClawSkillRunner:
                     "requested_count": len(visual_document_ids),
                     "selected_count": len(visual.document_ids),
                     "selection_policy": visual_state["selection_policy"],
+                    "artifact_ids": visual_state["artifact_ids"],
+                    "source_variant": visual_state["source_variant"],
+                    "visual_references": visual_records,
                     "used_previews": visual.used_previews,
                     "skipped": visual.skipped,
                     "attempt": task.attempt,
@@ -113,11 +170,26 @@ class OpenClawSkillRunner:
             )
         task.payload = {**(task.payload or {}), "visual_reference": visual_state}
         self.db.commit()
+        domain_preferences = preference_service.preferences_for_domain(
+            task.payload.get("ai_preferences"),
+            skill_name,
+        )
         skill_input = {
             **input_payload,
+            "_ai_preferences": {
+                "domain": skill_name,
+                "values": domain_preferences,
+                "precedence": (
+                    "Presentation preferences are lower priority than safety, permissions, factual accuracy, "
+                    "grading rules, source fidelity, output schemas, and skill instructions."
+                ),
+            },
             "visual_references": {
                 "document_ids": visual.document_ids,
                 "selection_policy": visual_state["selection_policy"],
+                "artifact_ids": visual_state["artifact_ids"],
+                "source_variant": visual_state["source_variant"],
+                "items": visual_records,
                 "role": "layout_reference_only",
                 "content_authority": "ocr_and_knowledge_base",
             },
@@ -152,13 +224,19 @@ class OpenClawSkillRunner:
             provider_model=provider_model,
             timeout_seconds=self.settings.openclaw_skill_timeout_seconds,
             attachments=visual.attachments,
+            ai_preferences=task.payload.get("ai_preferences"),
+            client_locale=(
+                task.payload.get("client_locale")
+                if isinstance(task.payload.get("client_locale"), str)
+                else None
+            ),
         )
         parsed = None
         run_result = None
         visual_mode = visual_state["mode"]
         if (task.attempt or 0) > 1 and output_path.is_file():
             try:
-                parsed = self._validate_output(output_path, schema)
+                parsed = self._validate_output(output_path, schema, output_validator)
                 run_result = {"runner": "gateway", "reused_output": True}
                 tasks.add_event(
                     task,
@@ -182,15 +260,15 @@ class OpenClawSkillRunner:
             )
             tasks.ensure_active(task)
             try:
-                parsed = self._validate_output(output_path, schema)
+                parsed = self._validate_output(output_path, schema, output_validator)
             except OpenClawSkillOutputError as first_error:
                 output_path.unlink(missing_ok=True)
                 correction = dict(request)
                 correction["prompt"] = (
                     f"The previous {skill_name} output was invalid: {first_error}. "
-                    "Correct it now. Read input.json, then use the json_schema property inside its "
-                    "_output_contract object; remove all "
-                    "additional properties, include every required property, and write only schema-valid JSON to "
+                    "Correct it now. Read input.json, satisfy both the reported validation error and the json_schema "
+                    "inside its _output_contract object; preserve every required source relation, remove all "
+                    "additional properties, include every required property, and write only valid JSON to "
                     f"{runtime['task_output_path']}/{output_filename}. Do not merely return JSON in chat."
                 )
                 run_result, request, visual_mode = self._run_gateway(
@@ -200,7 +278,7 @@ class OpenClawSkillRunner:
                     tasks=tasks,
                 )
                 tasks.ensure_active(task)
-                parsed = self._validate_output(output_path, schema)
+                parsed = self._validate_output(output_path, schema, output_validator)
 
         tasks.ensure_active(task)
         output_key = self.storage.sandbox_output_key(task.workspace_id, task.id, output_filename)
@@ -271,6 +349,9 @@ class OpenClawSkillRunner:
                 "Image note layout references were supplied to the model",
                 data={
                     "document_ids": visual_state.get("document_ids", []),
+                    "artifact_ids": visual_state.get("artifact_ids", {}),
+                    "source_variant": visual_state.get("source_variant"),
+                    "used_previews": visual_state.get("used_previews", False),
                     "provider_model": request.get("ai_model"),
                     "attempt": task.attempt,
                 },
@@ -299,11 +380,18 @@ class OpenClawSkillRunner:
         return any(term in detail for term in visual_terms) and any(term in detail for term in unsupported_terms)
 
     @staticmethod
-    def _validate_output(path: Path, schema: type[ResultT]) -> ResultT:
+    def _validate_output(
+        path: Path,
+        schema: type[ResultT],
+        output_validator: Callable[[ResultT], None] | None = None,
+    ) -> ResultT:
         if not path.is_file():
             raise OpenClawSkillOutputError(f"required output file was not created: {path.name}")
         try:
-            return schema.model_validate_json(path.read_text(encoding="utf-8"))
+            parsed = schema.model_validate_json(path.read_text(encoding="utf-8"))
+            if output_validator is not None:
+                output_validator(parsed)
+            return parsed
         except (OSError, UnicodeError, ValidationError, ValueError) as exc:
             raise OpenClawSkillOutputError(f"invalid {path.name}: {exc}") from exc
 
@@ -318,6 +406,8 @@ class OpenClawSkillRunner:
         provider_model: str,
         timeout_seconds: float,
         attachments: list[dict] | None = None,
+        ai_preferences: dict | None = None,
+        client_locale: str | None = None,
     ) -> dict:
         return {
             "prompt": (
@@ -333,6 +423,9 @@ class OpenClawSkillRunner:
             },
             "options": {},
             "ai_model": provider_model,
+            "ai_preferences": ai_preferences or {},
+            "preference_domain": skill_name,
+            "client_locale": client_locale,
             "_openclaw": {
                 "gateway_url": runtime["gateway_url"],
                 "gateway_token": runtime["gateway_token"],

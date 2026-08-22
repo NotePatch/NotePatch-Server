@@ -71,13 +71,16 @@ class TaskService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported task type: {task_type}")
         queue_name = queue_name or queue_name_for_task_type(self.settings, task_type)
         redis_key = redis_key_for_queue(self.settings, queue_name)
+        from notepatch.modules.identity.services.ai_preferences import AiPreferenceService
+
+        payload = AiPreferenceService(self.db).snapshot_payload(workspace_id, task_type, payload)
 
         task = Task(
             workspace_id=workspace_id,
             task_type=task_type,
             resource_type=resource_type,
             resource_id=resource_id,
-            payload=payload or {},
+            payload=payload,
             status="queued",
             progress=0,
             attempt=0,
@@ -222,6 +225,23 @@ class TaskService:
             self.add_event(task, "schedule_failed", "Task could not be scheduled", level="error")
             self.db.commit()
             return False
+
+    def enqueue_task_now(self, task: Task, *, queue_name: str | None = None) -> bool:
+        """Move an existing delayed queued task to its worker queue immediately."""
+        queue_name = queue_name or queue_name_for_task_type(self.settings, task.task_type)
+        task.status = "queued"
+        task.next_attempt_at = None
+        task.finished_at = None
+        task.updated_at = utcnow()
+        self.add_event(
+            task,
+            "queued_immediately",
+            "Task queued for immediate execution",
+            data={"queue": queue_name},
+        )
+        self.db.commit()
+        self._remove_from_redis(task)
+        return self.enqueue_task(task.id, queue_name=queue_name)
 
     def create_delayed_task(
         self,

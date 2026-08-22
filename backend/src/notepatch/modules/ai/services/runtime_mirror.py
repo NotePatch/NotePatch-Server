@@ -26,8 +26,10 @@ class OpenClawRuntimeMirror:
         task_id: str,
         model_ids: tuple[str, ...] | None = None,
         document_ids: set[str] | None = None,
+        corrected_visual_document_ids: set[str] | None = None,
     ) -> dict:
         runtime = self.runtime_for_workspace(db, workspace_id, model_ids=model_ids)
+        corrected_visual_document_ids = corrected_visual_document_ids or set()
         user_id = runtime["user_id"]
         documents_root = self.task_documents_root(user_id, task_id)
         if documents_root.exists():
@@ -60,25 +62,41 @@ class OpenClawRuntimeMirror:
             for path in (original_dir, artifacts_dir, ocr_dir):
                 path.mkdir(parents=True, exist_ok=True)
 
+            corrected_only = document.id in corrected_visual_document_ids
             original_path = original_dir / sanitize_filename(document.original_filename)
-            try:
-                storage.download_file(document.bucket, document.object_key, original_path)
-            except Exception as exc:
-                if StorageService.is_object_not_found_error(exc):
-                    shutil.rmtree(document_dir, ignore_errors=True)
-                    skipped_documents.append(self._skipped_document(document, "object_not_found"))
-                    continue
-                from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeError
+            original_container_path = None
+            if not corrected_only:
+                try:
+                    storage.download_file(document.bucket, document.object_key, original_path)
+                except Exception as exc:
+                    if StorageService.is_object_not_found_error(exc):
+                        shutil.rmtree(document_dir, ignore_errors=True)
+                        skipped_documents.append(self._skipped_document(document, "object_not_found"))
+                        continue
+                    from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeError
 
-                raise OpenClawUserRuntimeError(
-                    f"Could not mirror document {document.id} object {document.object_key}: {exc}"
-                ) from exc
-            file_count += 1
+                    raise OpenClawUserRuntimeError(
+                        f"Could not mirror document {document.id} object {document.object_key}: {exc}"
+                    ) from exc
+                file_count += 1
+                original_container_path = self._container_workspace_path(user_id, original_path)
 
             artifact_entries: list[dict] = []
             ocr_markdown_path = None
             ocr_text_path = None
-            for artifact in sorted(document.artifacts, key=lambda item: item.created_at):
+            deskewed_image_path = None
+            deskewed_artifact_id = None
+            artifacts = db.scalars(
+                select(DocumentArtifact)
+                .where(
+                    DocumentArtifact.workspace_id == workspace_id,
+                    DocumentArtifact.document_id == document.id,
+                )
+                .order_by(DocumentArtifact.created_at.asc())
+            ).all()
+            for artifact in artifacts:
+                if corrected_only and artifact.artifact_type == "original":
+                    continue
                 artifact_reason = self._artifact_skip_reason(artifact)
                 if artifact_reason is not None:
                     skipped_artifacts.append(self._skipped_artifact(artifact, document.id, artifact_reason))
@@ -107,6 +125,12 @@ class OpenClawRuntimeMirror:
                     ocr_markdown_path = container_path
                 elif artifact.artifact_type == "ocr_text":
                     ocr_text_path = container_path
+                elif (
+                    artifact.artifact_type == "deskewed_image"
+                    and (artifact.metadata_ or {}).get("processor") == "doctr"
+                ):
+                    deskewed_image_path = container_path
+                    deskewed_artifact_id = artifact.id
                 artifact_entries.append(
                     {
                         "id": artifact.id,
@@ -121,10 +145,18 @@ class OpenClawRuntimeMirror:
                     }
                 )
 
+            if corrected_only and not deskewed_image_path:
+                from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeError
+
+                raise OpenClawUserRuntimeError(
+                    f"Corrected visual artifact is unavailable for document {document.id}"
+                )
+
             index_documents.append(
                 {
                     "id": document.id,
                     "title": document.title,
+                    "remark": document.remark,
                     "original_filename": document.original_filename,
                     "mime_type": document.mime_type,
                     "file_size": document.file_size,
@@ -136,7 +168,9 @@ class OpenClawRuntimeMirror:
                     "metadata": document.metadata_,
                     "created_at": self._iso(document.created_at),
                     "updated_at": self._iso(document.updated_at),
-                    "original_path": self._container_workspace_path(user_id, original_path),
+                    "original_path": original_container_path,
+                    "deskewed_image_path": deskewed_image_path,
+                    "deskewed_artifact_id": deskewed_artifact_id,
                     "ocr_markdown_path": ocr_markdown_path,
                     "ocr_text_path": ocr_text_path,
                     "artifacts": artifact_entries,
@@ -146,11 +180,15 @@ class OpenClawRuntimeMirror:
                 "document_id": document.id,
                 "filename": document.original_filename,
                 "title": document.title,
+                "remark": document.remark,
                 "mime_type": document.mime_type,
                 "file_type": document.file_type,
                 "file_size": document.file_size,
                 "status": document.status,
-                "original_path": self._container_workspace_path(user_id, original_path),
+                "original_path": original_container_path,
+                "deskewed_image_path": deskewed_image_path,
+                "deskewed_artifact_id": deskewed_artifact_id,
+                "deskewed_mime_type": "image/png" if deskewed_image_path else None,
                 "ocr_markdown_path": ocr_markdown_path,
                 "ocr_text_path": ocr_text_path,
             }
@@ -217,6 +255,7 @@ class OpenClawRuntimeMirror:
         return {
             "id": document.id,
             "title": document.title,
+            "remark": document.remark,
             "original_filename": document.original_filename,
             "status": document.status,
             "bucket": document.bucket,

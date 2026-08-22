@@ -19,7 +19,11 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ai_history_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auto_image_remark_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     preferred_ai_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ai_onboarding_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ai_onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ai_preferences: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     note_content_edit_level: Mapped[str] = mapped_column(String(32), default="conceptual", nullable=False)
     note_layout_edit_level: Mapped[str] = mapped_column(String(32), default="minor", nullable=False)
     note_history_limit: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
@@ -34,6 +38,10 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+
+    @property
+    def ai_onboarding_completed(self) -> bool:
+        return self.ai_onboarding_completed_at is not None and self.ai_onboarding_version >= 1
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

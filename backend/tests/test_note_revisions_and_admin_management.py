@@ -4,6 +4,7 @@ from notepatch.modules.admin.models.admin import AdminAuditLog, AdminOperation
 from notepatch.modules.identity.models.user import User
 from notepatch.modules.learning.models.homework import Mistake
 from notepatch.modules.learning.models.learning import LearningUnit, StudyNoteVersion
+from notepatch.modules.learning.services.note_render import NoteRenderService
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.executor import process_task
 from notepatch.platform.config import get_settings
@@ -63,7 +64,14 @@ def test_note_revision_creates_version_and_downstream_tasks(client, db_sessionma
     response = client.post(
         f"/api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{base_id}/revisions",
         headers=auth_headers(alice["access_token"]),
-        json={"title": "Edited Algebra", "html": "<article><h1>Edited</h1><p>New content</p></article>", "edit_summary": "Clarified signs"},
+        json={
+            "title": "Edited Algebra",
+            "html": (
+                '<article><h1>Edited</h1><p><span class="np-font-size-24" '
+                'style="font-size:40px">New content</span></p></article>'
+            ),
+            "edit_summary": "Clarified signs",
+        },
     )
     assert response.status_code == 201, response.text
     payload = response.json()
@@ -75,6 +83,17 @@ def test_note_revision_creates_version_and_downstream_tasks(client, db_sessionma
         "highlight_study_notes",
         "purge_study_note_history",
     }
+    html_key = payload["note"]["html_object_key"]
+    persisted_html = fake_storage.get_text_artifact(html_key)
+    assert 'class="np-font-size-24"' in persisted_html
+    assert "style=" not in persisted_html
+    with db_sessionmaker() as db:
+        revision = db.get(StudyNoteVersion, payload["note"]["id"])
+        render_url = NoteRenderService().create_url(revision, 900)
+    rendered = client.get(render_url)
+    assert rendered.status_code == 200
+    assert 'class="np-font-size-24"' in rendered.text
+    assert "/api/v1/assets/note-themes/" in rendered.text
 
     stale = client.post(
         f"/api/v1/workspaces/{workspace_id}/learning-units/{unit_id}/notes/{base_id}/revisions",

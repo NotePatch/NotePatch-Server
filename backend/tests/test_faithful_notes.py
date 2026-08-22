@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from notepatch.modules.learning.models.knowledge import KnowledgeChunk
 from notepatch.modules.learning.models.learning import KnowledgePoint, LearningUnit, StudyNoteVersion
 from notepatch.modules.learning.models.note_workflow import NoteGapSuggestion
 from notepatch.modules.learning.schemas.skills import ScholarNotesResult
-from notepatch.modules.learning.services.note_ir import validate_note_ir
+from notepatch.modules.learning.services.note_ir import (
+    is_notebook_branding_text,
+    render_note_ir,
+    validate_note_ir,
+)
+from notepatch.modules.learning.services.note_markdown import render_note_markdown
 from notepatch.modules.tasks.models.task import Task
 from notepatch.modules.tasks.services.executor import process_task
 from notepatch.modules.tasks.services.task import TaskService
@@ -20,11 +26,25 @@ from tests.test_learning_workflow import (
 )
 
 
-def _scholar_payload(source_blocks, point_id: str, *, reverse: bool = False, code_text: str | None = None):
-    ordered = list(reversed(source_blocks)) if reverse else source_blocks
+def _scholar_payload(
+    source_blocks,
+    point_id: str,
+    *,
+    reverse: bool = False,
+    code_text: str | None = None,
+    omitted_source_ids: set[str] | None = None,
+    excluded_source_blocks: list[dict] | None = None,
+    title: str = "Faithful note",
+):
+    omitted_source_ids = omitted_source_ids or set()
+    ordered = [
+        item
+        for item in (list(reversed(source_blocks)) if reverse else source_blocks)
+        if item["id"] not in omitted_source_ids
+    ]
     return ScholarNotesResult.model_validate(
         {
-            "title": "Faithful note",
+            "title": title,
             "note_ir": {
                 "summary": "Faithful transcription",
                 "blocks": [
@@ -42,6 +62,7 @@ def _scholar_payload(source_blocks, point_id: str, *, reverse: bool = False, cod
                     for index, source in enumerate(ordered)
                 ],
             },
+            "excluded_source_blocks": excluded_source_blocks or [],
             "corrections": [],
             "knowledge_points": [{"id": point_id, "name": "Loops", "section_id": "loops"}],
             "source_document_ids": ["document-1"],
@@ -86,6 +107,230 @@ def test_note_ir_enforces_order_and_exact_code_whitespace():
         assert "correction record" in str(exc)
     else:
         raise AssertionError("code indentation changed without a correction record")
+
+
+def test_note_markdown_renders_paragraphs_lists_headings_and_inline_code():
+    html = render_note_markdown(
+        "## File operations\n\n"
+        "Files remain available after a program closes.\n"
+        "This line stays visually separate.\n\n"
+        "1. `open()` opens a file.\n"
+        "2. `read()` reads a file.\n\n"
+        "- `'a'` appends data.\n"
+        "- `'w'` overwrites data."
+    )
+
+    assert "<h3>File operations</h3>" in html
+    assert html.count("<p>") == 1
+    assert "<br>" in html
+    assert "<ol>" in html and "<ul>" in html
+    assert "<code>open()</code>" in html
+    assert "## File operations" not in html
+
+
+def test_note_markdown_blocks_raw_html_links_and_images():
+    html = render_note_markdown(
+        "<script>alert(1)</script>\n\n"
+        "[external](https://example.com)\n\n"
+        "![image](https://example.com/image.png)"
+    )
+
+    assert "<script" not in html
+    assert "<a " not in html
+    assert "<img" not in html
+    assert "https://example.com" in html
+
+
+def test_note_markdown_fenced_code_preserves_whitespace():
+    html = render_note_markdown("```python\nwhile True:\n    break\n```")
+
+    assert '<pre class="np-code"><code data-language="python">' in html
+    assert "while True:\n    break" in html
+
+
+def test_note_ir_renders_markdown_inside_text_blocks_without_affecting_code_blocks():
+    blocks = [
+        {
+            "id": "source-1",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 0, 100, 20],
+            "reading_order": 1,
+            "text": "## Scope\n\nLocal variables stay local.\n\n- Local\n- Global",
+        }
+    ]
+    result = _scholar_payload(blocks, "point-1")
+
+    html = render_note_ir(result)
+
+    assert "<h3>Scope</h3>" in html
+    assert "<ul>" in html
+    assert "## Scope" not in html
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "星河实验学校",
+        "晨光文具有限公司",
+        "制造商：示例文具",
+        "Example Notebook Publisher",
+        "Acme Ltd.",
+    ],
+)
+def test_notebook_identity_detector_accepts_high_confidence_marks(value):
+    assert is_notebook_branding_text(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "公司法规定了企业的组织形式",
+        "大学阶段需要掌握数据结构",
+        "manufacturer is a field in this example",
+        "while True: continue",
+    ],
+)
+def test_notebook_identity_detector_does_not_remove_learning_sentences(value):
+    assert not is_notebook_branding_text(value)
+
+
+def test_editable_note_excludes_notebook_identity_block_and_never_renders_it():
+    blocks = [
+        {
+            "id": "source-brand",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 0, 100, 20],
+            "reading_order": 1,
+            "text": "星河实验学校",
+            "notebook_identity_candidate": True,
+        },
+        {
+            "id": "source-content",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 30, 100, 50],
+            "reading_order": 2,
+            "text": "while 循环是前验循环",
+        },
+    ]
+    result = _scholar_payload(
+        blocks,
+        "point-1",
+        omitted_source_ids={"source-brand"},
+        excluded_source_blocks=[
+            {
+                "source_block_id": "source-brand",
+                "category": "school",
+                "reason": "Printed notebook header",
+            }
+        ],
+    )
+
+    validate_note_ir(result, blocks, content_edit_level="conceptual", layout_edit_level="minor")
+    html = render_note_ir(result)
+    assert "星河实验学校" not in html
+    assert "while 循环是前验循环" in html
+
+
+def test_editable_note_rejects_unexcluded_or_leaked_notebook_identity():
+    blocks = [
+        {
+            "id": "source-brand",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 0, 100, 20],
+            "reading_order": 1,
+            "text": "晨光文具有限公司",
+            "notebook_identity_candidate": True,
+        },
+        {
+            "id": "source-content",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 30, 100, 50],
+            "reading_order": 2,
+            "text": "二叉树的前序遍历",
+        },
+    ]
+    with pytest.raises(ValueError, match="must exclude notebook identity"):
+        validate_note_ir(
+            _scholar_payload(blocks, "point-1"),
+            blocks,
+            content_edit_level="spelling",
+            layout_edit_level="minor",
+        )
+
+    leaked = _scholar_payload(
+        blocks,
+        "point-1",
+        omitted_source_ids={"source-brand"},
+        excluded_source_blocks=[{"source_block_id": "source-brand", "category": "company"}],
+        title="晨光文具有限公司 二叉树笔记",
+    )
+    with pytest.raises(ValueError, match="still visible"):
+        validate_note_ir(
+            leaked,
+            blocks,
+            content_edit_level="conceptual",
+            layout_edit_level="minor",
+        )
+
+
+def test_verbatim_note_preserves_notebook_identity_and_rejects_exclusion():
+    blocks = [
+        {
+            "id": "source-brand",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 0, 100, 20],
+            "reading_order": 1,
+            "text": "星河实验学校",
+            "notebook_identity_candidate": True,
+        },
+        {
+            "id": "source-content",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 30, 100, 50],
+            "reading_order": 2,
+            "text": "循环结构",
+        },
+    ]
+    preserved = _scholar_payload(blocks, "point-1")
+    validate_note_ir(preserved, blocks, content_edit_level="verbatim", layout_edit_level="preserve")
+    assert "星河实验学校" in render_note_ir(preserved)
+
+    excluded = _scholar_payload(
+        blocks,
+        "point-1",
+        omitted_source_ids={"source-brand"},
+        excluded_source_blocks=[{"source_block_id": "source-brand", "category": "school"}],
+    )
+    with pytest.raises(ValueError, match="verbatim mode"):
+        validate_note_ir(excluded, blocks, content_edit_level="verbatim", layout_edit_level="preserve")
+
+
+def test_note_ir_diagram_is_structured_text_and_never_embeds_source_image():
+    blocks = [
+        {
+            "id": "source-diagram",
+            "document_id": "document-1",
+            "page_index": 0,
+            "bbox": [0, 0, 100, 100],
+            "reading_order": 1,
+            "text": "Loop condition points to the exit branch",
+        }
+    ]
+    result = _scholar_payload(blocks, "point-1")
+    result.note_ir.blocks[0].type = "diagram"
+
+    html = render_note_ir(result)
+
+    assert "Loop condition points to the exit branch" in html
+    assert "<img" not in html
+    assert "data-note-asset-id" not in html
 
 
 def test_preferences_and_note_set_upload_scope(client):

@@ -55,11 +55,35 @@ class NoteBlockRelation(StrictResult):
     text: str | None = None
 
 
+class NoteEvidenceRef(StrictResult):
+    evidence_id: str = Field(min_length=1, max_length=128)
+    source_type: Literal[
+        "knowledge_chunk",
+        "courseware_ocr",
+        "answer_key_ocr",
+        "rubric_ocr",
+        "homework_question",
+        "grading_feedback",
+    ] | None = None
+    document_id: str | None = None
+    knowledge_chunk_id: str | None = None
+    question_id: str | None = None
+    grading_result_id: str | None = None
+    page_index: int | None = Field(default=None, ge=0)
+    block_id: str | None = None
+    excerpt: str | None = Field(default=None, max_length=1000)
+    relevance_score: float | None = Field(default=None, ge=-1, le=1)
+    authoritative: bool | None = None
+
+
 class NoteIrBlock(StrictResult):
     id: str = Field(min_length=1, max_length=128)
     type: Literal["text", "code", "formula", "table", "diagram", "annotation"]
-    source_block_ids: list[str] = Field(min_length=1)
-    source_document_id: str
+    origin: Literal["manuscript", "evidence_supplement"] = "manuscript"
+    source_block_ids: list[str] = Field(default_factory=list)
+    source_document_id: str | None = None
+    source_refs: list[NoteEvidenceRef] = Field(default_factory=list)
+    supplement_reason: str | None = Field(default=None, max_length=500)
     page_index: int = Field(ge=0)
     bbox: list[float] = Field(min_length=4, max_length=4)
     reading_order: int = Field(ge=0)
@@ -70,12 +94,33 @@ class NoteIrBlock(StrictResult):
     table_html: str | None = None
     relations: list[NoteBlockRelation] = Field(default_factory=list)
     confidence: float = Field(default=1.0, ge=0, le=1)
-    preserve_as_image: bool = False
+
+    @model_validator(mode="after")
+    def validate_origin_sources(self):
+        if self.origin == "manuscript":
+            if not self.source_block_ids or not self.source_document_id:
+                raise ValueError("manuscript note blocks require source block and document ids")
+            if self.source_refs:
+                raise ValueError("manuscript note blocks cannot contain completion evidence refs")
+        else:
+            if self.source_block_ids:
+                raise ValueError("evidence supplement blocks cannot claim manuscript source blocks")
+            if not self.source_refs:
+                raise ValueError("evidence supplement blocks require source refs")
+            if not self.supplement_reason:
+                raise ValueError("evidence supplement blocks require a completion reason")
+        return self
 
 
 class NoteIrDocument(StrictResult):
     summary: str = Field(min_length=1)
     blocks: list[NoteIrBlock] = Field(min_length=1)
+
+
+class NoteSourceExclusion(StrictResult):
+    source_block_id: str
+    category: Literal["school", "company", "manufacturer", "publisher", "organization", "branding"]
+    reason: str | None = Field(default=None, max_length=255)
 
 
 class NoteCorrectionResult(StrictResult):
@@ -91,6 +136,7 @@ class NoteCorrectionResult(StrictResult):
 class ScholarNotesResult(StrictResult):
     title: str = Field(min_length=1)
     note_ir: NoteIrDocument
+    excluded_source_blocks: list[NoteSourceExclusion] = Field(default_factory=list)
     corrections: list[NoteCorrectionResult] = Field(default_factory=list)
     outline: list[str] = Field(default_factory=list)
     knowledge_points: list[ScholarKnowledgePoint] = Field(min_length=1)

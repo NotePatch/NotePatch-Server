@@ -157,6 +157,30 @@ class WorkflowTracker:
         runs = list(workflow_runs or [])
         if parent_task is not None:
             runs.extend(self.runs_for_task(parent_task.id))
+        stage, phase = TASK_STAGE.get(task.task_type, (task.task_type, "core"))
+
+        # Learning-unit enrichment is intentionally shared by every document that
+        # contributed to the unit. A later document may be the one that creates the
+        # debounced note/flashcard task, while earlier workflows are already waiting
+        # for that same result. Link those pending runs at task creation time so they
+        # can all reach a terminal state.
+        if (
+            phase == "enrichment"
+            and task.resource_type == "learning_unit"
+            and isinstance(task.resource_id, str)
+        ):
+            runs.extend(
+                self.db.scalars(
+                    select(WorkflowRun).where(
+                        WorkflowRun.workspace_id == task.workspace_id,
+                        WorkflowRun.learning_unit_id == task.resource_id,
+                        WorkflowRun.status.in_(("queued", "running", "waiting")),
+                        WorkflowRun.enrichment_status.in_(
+                            ("not_started", "queued", "running", "waiting")
+                        ),
+                    )
+                ).all()
+            )
         if not runs:
             run_ids = task.payload.get("workflow_run_ids") or []
             if isinstance(task.payload.get("workflow_run_id"), str):
@@ -179,7 +203,6 @@ class WorkflowTracker:
         if not unique_runs:
             return []
 
-        stage, phase = TASK_STAGE.get(task.task_type, (task.task_type, "core"))
         links: list[WorkflowTaskLink] = []
         for run in unique_runs.values():
             link = self.db.scalar(

@@ -62,9 +62,8 @@ def test_profile_update_uses_etag_and_idempotency(client, db_sessionmaker):
     assert conflict.json()["code"] == "idempotency_conflict"
 
     with db_sessionmaker() as db:
-        logs = db.query(IdentityAuditLog).all()
+        logs = db.query(IdentityAuditLog).filter(IdentityAuditLog.action == "profile.update").all()
         assert len(logs) == 1
-        assert logs[0].action == "profile.update"
         assert "password" not in str(logs[0].after_data).lower()
 
 

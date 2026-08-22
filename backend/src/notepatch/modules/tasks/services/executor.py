@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from notepatch.modules.ai.services.chat import ChatService
 from notepatch.modules.admin.models.admin import AdminOperation
 from notepatch.modules.ai.services.gateway import OpenClawRunner, get_openclaw_runner
+from notepatch.modules.ai.services.image_naming import mark_image_remark_failure
 from notepatch.modules.ai.services.runtime import OpenClawUserRuntimeService
 from notepatch.modules.ai.services.skill_runner import OpenClawSkillRunner
 from notepatch.modules.documents.models.document import Document
@@ -49,12 +50,15 @@ def process_task(
 
     storage = storage or StorageService()
     openclaw_runner = openclaw_runner or get_openclaw_runner()
+    doctr_client = doctr_client or get_doctr_client()
     gpu_lease = gpu_lease or GpuLeaseService()
     embedding_client = embedding_client or EmbeddingClient(gpu_lease=gpu_lease)
     skill_runner = skill_runner or OpenClawSkillRunner(
         db=db,
         storage=storage,
         gateway_runner=openclaw_runner,
+        doctr_client=doctr_client,
+        gpu_lease=gpu_lease,
     )
     learning = LearningWorkflowService(
         db,
@@ -68,7 +72,7 @@ def process_task(
         task=task,
         storage=storage,
         openclaw_runner=openclaw_runner,
-        doctr_client=doctr_client or get_doctr_client(),
+        doctr_client=doctr_client,
         ocr_pipeline=ocr_pipeline or OcrPipeline(),
         gpu_lease=gpu_lease,
         embedding_client=embedding_client,
@@ -132,6 +136,8 @@ def _handle_task_failure(
             if operation is not None:
                 operation.status = "queued"
                 operation.error_message = str(exc)
+        if task.task_type == "generate_image_remark":
+            mark_image_remark_failure(db, task, str(exc), retrying=True)
         ChatService(db).mark_assistant_queued(task)
         db.commit()
         return
@@ -158,6 +164,8 @@ def _handle_task_failure(
             operation.status = "failed"
             operation.error_message = str(exc)
             operation.finished_at = utcnow()
+    if task.task_type == "generate_image_remark":
+        mark_image_remark_failure(db, task, str(exc), retrying=False)
     ChatService(db).mark_assistant_failed(task, str(exc))
     tasks.mark_failed(task, str(exc))
 

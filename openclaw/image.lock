@@ -1,1 +1,2 @@
 OPENCLAW_USER_GATEWAY_IMAGE=openclaw-webui-node-docker:local
+OPENCLAW_SANDBOX_IMAGE=notepatch-openclaw-sandbox:filetools-v1

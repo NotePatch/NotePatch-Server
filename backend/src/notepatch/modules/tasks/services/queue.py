@@ -4,6 +4,7 @@ from notepatch.platform.config import Settings
 
 
 OPENCLAW_BACKED_TASK_TYPES = {
+    "generate_image_remark",
     "openclaw_agent_run",
     "extract_questions",
     "build_knowledge_base",

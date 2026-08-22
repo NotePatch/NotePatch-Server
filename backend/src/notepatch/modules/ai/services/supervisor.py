@@ -27,6 +27,7 @@ MANAGED_LABELS = {
     "notepatch.kind": "openclaw-gateway",
 }
 OPENCLAW_TASK_TYPES = {
+    "generate_image_remark",
     "openclaw_agent_run",
     "extract_questions",
     "build_knowledge_base",
@@ -85,6 +86,7 @@ class OpenClawContainerManager:
             container.reload()
             if getattr(container, "status", None) == "running":
                 self._stop_container(container)
+            self._remove_user_sandboxes(user.id)
             container.remove()
             container = None
 
@@ -132,7 +134,38 @@ class OpenClawContainerManager:
             if getattr(container, "status", None) == "running":
                 self._stop_container(container)
             container.remove()
+        self._remove_user_sandboxes(user_id)
         shutil.rmtree(self.runtime.user_root(user_id), ignore_errors=True)
+
+    def _remove_user_sandboxes(self, user_id: str) -> int:
+        """Remove only sandboxes whose name or workspace mount belongs to this user."""
+        prefix = self.runtime.sandbox_container_prefix(user_id)
+        workspace_dir = str(self.runtime.workspace_dir(user_id).resolve())
+        removed = 0
+        try:
+            containers = self.docker.containers.list(
+                all=True,
+                filters={"label": ["openclaw.sandbox=1"]},
+            )
+        except Exception as exc:
+            logger.warning("Could not list OpenClaw sandboxes for user %s: %s", user_id, exc)
+            return 0
+        for sandbox in containers:
+            attrs = getattr(sandbox, "attrs", {}) or {}
+            name = getattr(sandbox, "name", None) or str(attrs.get("Name") or "").lstrip("/")
+            mounts = attrs.get("Mounts") or []
+            owns_workspace_mount = any(
+                isinstance(mount, dict)
+                and mount.get("Type") == "bind"
+                and str(mount.get("Source") or "") == workspace_dir
+                for mount in mounts
+            )
+            if not name.startswith(prefix) and not owns_workspace_mount:
+                continue
+            logger.info("Removing stale OpenClaw sandbox %s for user %s", name, user_id)
+            sandbox.remove(force=True)
+            removed += 1
+        return removed
 
     def managed_containers(self) -> list:
         return self.docker.containers.list(
@@ -148,6 +181,7 @@ class OpenClawContainerManager:
         environment = self.runtime.container_environment(user_id)
         volumes = self.runtime.container_volumes(user_id)
         group_add = self.runtime.container_group_add()
+        runtime_config_hash = self._file_digest(self.runtime.openclaw_json_path(user_id))
         config_hash = self._runtime_config_hash(
             image=image,
             network=network,
@@ -155,6 +189,7 @@ class OpenClawContainerManager:
             environment=environment,
             volumes=volumes,
             group_add=group_add,
+            runtime_config_hash=runtime_config_hash,
         )
         labels = {
             **MANAGED_LABELS,
@@ -185,6 +220,7 @@ class OpenClawContainerManager:
         environment: dict[str, str],
         volumes: dict[str, dict[str, str]],
         group_add: list[str],
+        runtime_config_hash: str,
     ) -> str:
         payload = {
             "image": image,
@@ -193,6 +229,7 @@ class OpenClawContainerManager:
             "environment": environment,
             "volumes": volumes,
             "group_add": group_add,
+            "runtime_config_hash": runtime_config_hash,
             "resources": {
                 "memory": self.settings.openclaw_gateway_memory_limit,
                 "nano_cpus": self.settings.openclaw_gateway_nano_cpus,
@@ -202,6 +239,26 @@ class OpenClawContainerManager:
             },
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _file_digest(path) -> str:
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OpenClawSupervisorError(f"Could not hash OpenClaw runtime config: {path}") from exc
+        defaults = ((config.get("agents") or {}).get("defaults") or {})
+        managed = {
+            "sandbox": defaults.get("sandbox"),
+            "skills": defaults.get("skills"),
+            "tools": config.get("tools"),
+        }
+        encoded = json.dumps(
+            managed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
     def _get_container(self, name: str):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import quote
@@ -57,30 +56,6 @@ class NoteRenderService:
         if payload.get("type") != "note_render" or not payload.get("note_version_id"):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid render URL")
         return payload
-
-    def inject_visual_assets(self, note: StudyNoteVersion, fragment: str, storage) -> str:
-        assets = (note.metadata_ or {}).get("visual_assets") or {}
-        for asset_id, item in assets.items():
-            object_key = item.get("object_key") if isinstance(item, dict) else None
-            if not object_key:
-                continue
-            try:
-                payload = storage.get_object_bytes(storage.bucket, object_key)
-            except Exception:
-                continue
-            mime_type = str(item.get("mime_type") or "image/png")
-            encoded = base64.b64encode(payload).decode("ascii")
-            marker = (
-                f'<figure class="np-source-fragment" data-note-asset-id="{asset_id}">'
-                '<figcaption>原稿中的图示或批注区域</figcaption></figure>'
-            )
-            rendered = (
-                f'<figure class="np-source-fragment" data-note-asset-id="{asset_id}">'
-                f'<img src="data:{mime_type};base64,{encoded}" alt="原稿图示或批注">'
-                '<figcaption>原稿中的图示或批注区域</figcaption></figure>'
-            )
-            fragment = fragment.replace(marker, rendered)
-        return fragment
 
     def wrap_html(self, note: StudyNoteVersion, fragment: str) -> str:
         css_url = self.settings.public_route_url(note_theme_css_path(note_theme_id(note)))

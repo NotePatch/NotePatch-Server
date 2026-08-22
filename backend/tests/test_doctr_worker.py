@@ -124,7 +124,7 @@ def test_image_document_pipeline_uses_doctr_and_writes_png_artifact(client, db_s
         task = process_task(db, task_id, storage=fake_storage, doctr_client=doctr_client)
         assert task is not None
         assert task.status == "succeeded"
-        assert doctr_client.uploads == [{"filename": "paper.png", "content_type": "image/png", "ill_rec": True}]
+        assert doctr_client.uploads == [{"filename": "paper.png", "content_type": "image/png", "ill_rec": False}]
 
         artifacts = db.query(DocumentArtifact).filter_by(document_id=upload["document"]["id"]).all()
         doctr_artifacts = [
@@ -135,6 +135,7 @@ def test_image_document_pipeline_uses_doctr_and_writes_png_artifact(client, db_s
         assert len(doctr_artifacts) == 1
         assert doctr_artifacts[0].mime_type == "image/png"
         assert doctr_artifacts[0].object_key.endswith("/deskewed_image.png")
+        assert doctr_artifacts[0].metadata_["illumination_rectification"] is False
         assert (doctr_artifacts[0].bucket, doctr_artifacts[0].object_key) in fake_storage.objects
         ocr_artifacts = [artifact for artifact in artifacts if artifact.artifact_type.startswith("ocr_")]
         assert {artifact.artifact_type for artifact in ocr_artifacts} == {"ocr_json", "ocr_markdown", "ocr_text"}

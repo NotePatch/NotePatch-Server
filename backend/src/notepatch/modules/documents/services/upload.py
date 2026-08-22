@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from notepatch.platform.config import get_settings
+from notepatch.modules.ai.services.image_naming import schedule_image_remark_ocr
 from notepatch.modules.documents.models.document import (
     AUTO_LEARNING_DOCUMENT_KINDS,
     CHAT_ATTACHMENT_KIND,
@@ -23,6 +24,56 @@ from notepatch.modules.tasks.services.workflow import WorkflowTracker
 from notepatch.platform.storage import StorageService
 from notepatch.modules.documents.services.tusd import TusdService
 from notepatch.shared.filenames import infer_file_type, sanitize_filename
+
+
+LEARNING_PIPELINE_FILE_TYPES = {"image", "pdf", "docx", "pptx"}
+EXTENDED_UPLOAD_EXTENSIONS = {
+    "jpg", "jpeg", "png", "webp", "tif", "tiff", "gif", "bmp", "heic",
+    "pdf", "doc", "docx", "odt", "rtf", "ppt", "pptx", "odp",
+    "xls", "xlsx", "ods", "txt", "md", "csv", "tsv", "json", "jsonl",
+    "yaml", "yml", "xml", "html", "htm", "epub", "eml", "msg", "ipynb",
+    "mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv",
+    "avi", "webm", "zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz", "zst",
+}
+
+
+def _filename_extension(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _validate_upload_format(
+    *,
+    filename: str,
+    mime_type: str | None,
+    file_type: str,
+    document_kind: str,
+    allowed_mime_types: set[str],
+) -> None:
+    extension = _filename_extension(filename)
+    declared = (mime_type or "").split(";", 1)[0].strip().lower()
+    known_extension = extension in EXTENDED_UPLOAD_EXTENSIONS
+    declared_allowed = declared in allowed_mime_types
+    generic_declared = declared in {"", "application/octet-stream"}
+    if (
+        (extension and not known_extension)
+        or (declared and not generic_declared and not declared_allowed)
+        or (not extension and not declared_allowed)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={
+                "code": "unsupported_file_format",
+                "message": f"Unsupported upload format: {declared or extension or 'unknown'}",
+            },
+        )
+    if document_kind in AUTO_LEARNING_DOCUMENT_KINDS and file_type not in LEARNING_PIPELINE_FILE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "unsupported_learning_format",
+                "message": "Learning documents must be an image, PDF, DOCX, or PPTX file",
+            },
+        )
 
 
 class UploadService:
@@ -42,6 +93,7 @@ class UploadService:
         file_size: int | None,
         document_kind: str,
         title: str | None,
+        remark: str | None = None,
         save_to_documents: bool = True,
         metadata: dict | None = None,
         note_set_id: str | None = None,
@@ -63,22 +115,48 @@ class UploadService:
         safe_filename = sanitize_filename(filename)
         object_key = self.storage.document_original_key(workspace_id, document_id, safe_filename)
         bucket = self.storage.bucket
+        file_type = infer_file_type(safe_filename, mime_type)
+        _validate_upload_format(
+            filename=safe_filename,
+            mime_type=mime_type,
+            file_type=file_type,
+            document_kind=document_kind,
+            allowed_mime_types=self.settings.upload_allowed_mime_type_set,
+        )
+        document_metadata = dict(metadata or {})
+        document_metadata.pop("ai_image_naming", None)
+        document_metadata.pop("image_remark_generation", None)
+        if title and title.strip():
+            document_metadata["title_source"] = "user"
+        user_remark = " ".join(remark.split()) if remark else None
+        auto_remark = (
+            file_type == "image"
+            and self.settings.ai_image_remark_enabled
+            and user.auto_image_remark_enabled
+            and user_remark is None
+        )
+        document_metadata["image_remark_generation"] = {
+            "status": "waiting_upload" if auto_remark else "user" if user_remark else "disabled",
+            **({"model": self.settings.ai_image_remark_model} if auto_remark else {}),
+        }
         document = Document(
             id=document_id,
             workspace_id=workspace_id,
             uploaded_by=user.id,
             title=title,
+            remark=user_remark or safe_filename,
+            remark_source="user" if user_remark else "original_filename",
             original_filename=safe_filename,
             mime_type=mime_type,
             file_size=file_size,
-            file_type=infer_file_type(safe_filename, mime_type),
+            file_type=file_type,
             document_kind=document_kind,
             retention_scope="workspace" if save_to_documents else "conversation",
             storage_backend="seaweedfs",
             bucket=bucket,
             object_key=object_key,
             status="created",
-            metadata_=metadata or {},
+            metadata_=document_metadata,
         )
         self.db.add(document)
         self.db.flush()
@@ -188,6 +266,8 @@ class UploadService:
                 if existing_scan is not None:
                     return document
             elif document.status in {"uploaded", "processing", "ready"}:
+                schedule_image_remark_ocr(self.db, task_service, document)
+                self.db.refresh(document)
                 return document
 
         if tus_upload_id:
@@ -242,6 +322,10 @@ class UploadService:
         document.mime_type = mime_type or document.mime_type
         document.file_size = file_size if file_size is not None else document.file_size
         upload_session.status = "completed"
+        remark_state = dict((document.metadata_ or {}).get("image_remark_generation") or {})
+        if remark_state.get("status") == "waiting_upload":
+            remark_state["status"] = "waiting_ocr"
+            document.metadata_ = {**(document.metadata_ or {}), "image_remark_generation": remark_state}
 
         existing_artifact = self.db.scalar(
             select(DocumentArtifact).where(
@@ -303,6 +387,10 @@ class UploadService:
                     WorkflowTracker(self.db).mark_ready_without_tasks(workflow, document)
                 self.db.commit()
                 self.db.refresh(document)
+
+        if not self.settings.clamav_enabled:
+            schedule_image_remark_ocr(self.db, task_service, document)
+            self.db.refresh(document)
 
         return document
 

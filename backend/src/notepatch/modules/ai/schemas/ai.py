@@ -2,10 +2,22 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from notepatch.modules.identity.schemas.auth import AiOnboardingQuestionRead
 from notepatch.shared.schemas import ORMModel
 
 
 THINKING_EFFORTS = {"minimal", "low", "medium", "high", "adaptive"}
+
+
+class ChatGreetingRead(BaseModel):
+    assistant_name: str
+    message: str
+    message_key: str
+    format: str = "markdown"
+    locale: str
+    onboarding_required: bool
+    onboarding_version: int
+    questions: list[AiOnboardingQuestionRead] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
